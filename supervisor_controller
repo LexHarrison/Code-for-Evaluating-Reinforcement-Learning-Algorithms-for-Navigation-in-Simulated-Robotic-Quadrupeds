@@ -1,0 +1,188 @@
+# supervisor controller
+from controller import Supervisor
+import zmq
+import matrix_ops
+import json
+
+import time #temporary
+
+print("ENTERED SUPERVISOR CONT")
+
+contextIN = zmq.Context()
+socketIN = contextIN.socket(zmq.PULL)
+socketIN.connect("tcp://localhost:5567")
+
+#TODO: set up reply socket (supervisor to maincont)
+contextOUT = zmq.Context()
+socketOUT = contextOUT.socket(zmq.PUB)
+socketOUT.connect("tcp://localhost:5568")
+
+TIME_STEP = 32
+
+supervisor = Supervisor()  # create Supervisor instance
+
+bioloid_node = supervisor.getFromDef('BIOLOID')
+if bioloid_node is None:
+    print("SUPERVISOR ERROR: Could not find node with DEF name 'BIOLOID'")
+else:
+    print("SUPERVISOR: Successfully found BIOLOID node")
+#root = supervisor.getRoot()
+goal_node = supervisor.getFromDef('goal')
+if goal_node is None:
+    print("SUPERVISOR ERROR: Could not find node with DEF name 'goal'")
+else:
+    print("SUPERVISOR: Successfully found goal node")
+
+# CLAUDE DEBUG
+"""def print_node_info(node, indent=0):
+    #Print information about a node and its children recursively.
+    if node is None:
+        return
+        
+    # Print this node's information with proper indentation
+    node_type = node.getTypeName()
+    node_def = node.getDef()
+    node_id = node.getId()
+    
+    # Get node's base name if available
+    base_name = None
+    try:
+        name_field = node.getField("name")
+        if name_field:
+            base_name = name_field.getSFString()
+    except:
+        # Some nodes don't have a "name" field
+        pass
+    
+    # Construct display string with all available info
+    node_info = node_type
+    if node_def:
+        node_info += f" [DEF: {node_def}]"
+    if base_name:
+        node_info += f" [name: {base_name}]"
+    node_info += f" [ID: {node_id}]"
+    
+    print(" " * indent + node_info)
+    
+    # Get children field
+    children_field = None
+    try:
+        children_field = node.getField("children")
+    except:
+        # Some nodes don't have a "children" field
+        pass
+    
+    # If there are children, iterate through them
+    if children_field and children_field.getType() == children_field.MF_NODE:
+        for i in range(children_field.getCount()):
+            child_node = children_field.getMFNode(i)
+            print_node_info(child_node, indent + 2)
+
+# Create the Supervisor instance
+#supervisor = Supervisor()
+
+# Get the root node of the scene tree
+root = supervisor.getRoot()
+
+print("Webots Scene Tree:")
+print("-----------------")
+print_node_info(root)"""
+# END DEBUG
+
+#print("SUPERVISOR: " + str(vars(bioloid_node)))
+#help(bioloid_node) #List all available functions.
+
+#translation_field = bioloid_node.getField('translation')
+#cur_position = bioloid_node.getPosition()
+#cur_rotation = bioloid_node.getOrientation() #no worky :(
+
+#cur_rotation = matrix_ops.matrix_to_quaternion(cur_rotation)
+
+#print("SUPERVISOR: position: " + str(cur_position))
+#print("SUPERVISOR: rot quaterion: " + str(cur_rotation))
+
+#cur_euler = matrix_ops.quaternion_to_euler(cur_rotation)
+#cur_euler_deg = matrix_ops.euler_to_degrees(cur_euler)
+#print("SUPERVISOR: rot euler deg (ZYX): " + str(cur_euler_deg))
+
+goalPos = goal_node.getField("translation")
+goalPos = goalPos.getSFVec3f()
+
+last_reset_time = 0 #Unix timestamp of last reset time. Prevents continuous resets.
+
+# [CODE PLACEHOLDER 1]
+class SupervisorMainThread:
+    #last_reset_time = 0 #Assign here?
+    def __init__():
+        #Get goal coordinates from in-world node and send to main controller
+        #goalPos = goal_node.getField("translation")
+        #goalPos = goalPos.getSFVec3f()
+        print("SUPERVISOR: Goal coords: " + str(goalPos))
+        #socketOUT.send_string(str(goalPos)) 
+        #print("SUPERVISOR: Sent coords to main controller")
+
+
+    def getTranslation():
+        rot = bioloid_node.getOrientation() #returns 3x3 matrix of rotation
+        rot = matrix_ops.matrix_to_quaternion(rot)#convert to quaternion
+        ret = {
+            "pos": bioloid_node.getPosition(),
+            "rot": rot
+        } #JSON STUFF
+        print("SUPERVISOR: Translation JSON: " + str(ret))
+        return ret
+    
+    def getRotEulerDeg(quat):
+        #print("test")
+        ret = matrix_ops.quaternion_to_euler(quat) #Returns Euler angle in Radians
+        ret = matrix_ops.euler_to_degrees(ret) #Returns angle in degrees
+        return ret
+
+    def handleJSON(JSON):
+        global last_reset_time
+        print("Function called, got: " + json.dumps(JSON))
+        if(JSON["fall"] == True):
+            print("SUPERVISOR: Fallen!!")
+        elif(JSON["goal"] == True):
+            print("SUPERVISOR: Goal reached!!")
+        elif(JSON["time"] == True):
+            print("SUPERVISOR: Timeout!!")
+        else:
+            print("SUPERVISOR: Unknown status: " + json.dumps(JSON))
+        
+        curTime = int( time.time() )
+        if(last_reset_time != curTime ):
+            last_reset_time = curTime
+            supervisor.simulationReset() #Resets to world as defined in .wbt file
+            #TODO: Send reinitialize command to main controller to recalibrate IMU to prevent erroneous falls?
+            socketOUT.send_string("imuReset") #send signal to reinitialize?
+        else:
+            print(">>>> SUPERVISOR WARNING: Reset called multiple times!!!! <<<< JSON: " + json.dumps(JSON))
+
+    __init__() #Call for init
+    i = 0
+    translation = getTranslation()
+    print("SUPERVISOR: pos: " + str(translation["pos"]) + ", rot deg ZYX: " + str(getRotEulerDeg(translation["rot"])) )
+    while supervisor.step(TIME_STEP) != -1:
+    #while True:
+        #print("hello world")
+        # [CODE PLACEHOLDER 2]
+        #Infinite loop?
+        try:
+            message = socketIN.recv_string(flags=zmq.NOBLOCK) #Tag as non-blocking so it doesn't jam the entire program!
+            #print("SUPERVISOR: incoming - " + str(message)) #Prints later when found not to be JSON.
+            print("SUPERVISOR: Message recieved!")
+            try:
+                JSONin = json.loads(message)
+                print("SUPERVISOR: " + json.dumps(JSONin) + ", time: " + str( int(time.time()) ))
+                if( any(JSONin.values()) ):
+                    print("SUPERVISOR: 1 or more value(s) were true, doing stuff!")
+                    handleJSON(JSONin)
+            except ValueError:
+                print("SUPERVISOR: Not JSON: " + str(message))
+                """if(message == "goalPos"):
+                    print("SUPERVISOR: Got goal position request") #This doesn't work for no reason."""
+                pass
+        except zmq.Again:
+            pass
+        i += 1
