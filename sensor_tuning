@@ -1,0 +1,120 @@
+# sensor_tuning.py
+import math
+import numpy as np
+
+class SensorProcessor:
+    def __init__(self, robot):
+        self.robot = robot
+        self.collision_threshold = 0.15  # 15cm for collision detection
+        self.obstacle_threshold = 0.3    # 30cm for obstacle detection
+        
+    def read_lidar(self):
+        """Read and process lidar data."""
+        if not self.robot._lidar:
+            return None
+            
+        lidar_data = self.robot._lidar.getRangeImage()
+        resolution = self.robot._lidar.getHorizontalResolution()
+        
+        if not lidar_data:
+            return None
+            
+        return lidar_data, resolution
+    
+    def get_lidar_data_normalized(self):
+        """
+        Get normalized LiDAR data for the PPO agent.
+        Returns a fixed-size array of normalized lidar readings.
+        """
+        lidar_result = self.read_lidar()
+        if not lidar_result:
+            return None
+            
+        lidar_data, resolution = lidar_result
+        
+        # Downsample to a fixed number of readings (32 (not #16) in this case)
+        num_samples = 32 #16
+        
+        # Ensure we don't try to sample more points than resolution
+        if resolution < num_samples:
+            num_samples = resolution
+        
+        # Take evenly spaced samples
+        sample_indices = np.linspace(0, resolution-1, num_samples, dtype=np.int32)
+        sampled_data = [lidar_data[i] for i in sample_indices]
+        
+        # Normalize the data to [0, 1] range
+        # Assuming max range is about 5.0 (adjust based on your LiDAR specs)
+        max_range = 5.0
+        normalized_data = [min(1.0, max(0.0, reading / max_range)) for reading in sampled_data]
+        
+        return np.array(normalized_data, dtype=np.float32)
+    
+    def detect_obstacles(self):
+        """Detect obstacles using lidar data.
+        Returns list of (distance, angle) tuples for obstacles.
+        """
+        lidar_result = self.read_lidar()
+        if not lidar_result:
+            return []
+            
+        lidar_data, resolution = lidar_result
+        obstacles = []
+        
+        # Process lidar data to detect obstacles
+        for i in range(resolution):
+            distance = lidar_data[i]
+            if distance < self.obstacle_threshold and distance > self.collision_threshold:
+                # Calculate angle corresponding to this lidar ray
+                angle = (i / resolution) * 2 * math.pi
+                obstacles.append((distance, angle))
+        
+        return obstacles
+    
+    def detect_collisions(self):
+        """Detect collisions using lidar data.
+        Returns list of (distance, angle) tuples for collisions.
+        """
+        lidar_result = self.read_lidar()
+        if not lidar_result:
+            return []
+            
+        lidar_data, resolution = lidar_result
+        collisions = []
+        
+        # Process lidar data to detect collisions
+        for i in range(resolution):
+            distance = lidar_data[i]
+            if distance <= self.collision_threshold:
+                # Calculate angle corresponding to this lidar ray
+                angle = (i / resolution) * 2 * math.pi
+                collisions.append((distance, angle))
+        
+        return collisions
+    
+    def get_gps_coordinates(self):
+        """Get GPS coordinates."""
+        if not self.robot._gps:
+            return None
+            
+        ret = self.robot._gps.getValues()
+        return ret
+    
+    def calculate_distance_to_goal(self, goal_position):
+        """Calculate distance to goal using GPS."""
+        current_position = self.get_gps_coordinates()
+        if not current_position:
+            return float('inf')
+            
+        dx = current_position[0] - goal_position[0]
+        dy = current_position[1] - goal_position[1]
+        
+        return math.sqrt(dx*dx + dy*dy)
+        
+    def get_heading(self):
+        """Get robot heading in radians from IMU."""
+        if not self.robot._imu:
+            return 0
+            
+        _, _, yaw = self.robot._imu.getRollPitchYaw()
+        return yaw
