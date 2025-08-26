@@ -1,0 +1,29 @@
+# QTABLE-PREVIEW
+import pickle
+import numpy as np
+
+to_open = "q_table"
+grid_size = (20,20,3)
+q_table = {}
+
+def print_policy():
+    #Print the current policy (best action for each state).
+    action_symbols = ['↑', '→', '←']  # Forward, Right, Left... why 4?
+    #print("qtab: " + str(self.q_table))
+    print("\nCurrent Policy:")
+    print("-" * (grid_size[0] * 2 + 1))
+
+    for y in range(grid_size[1] - 1, -1, -1):  # Print from top to bottom
+        row = "|"
+        for x in range(grid_size[0]):
+            best_action = np.argmax(q_table[x, y, :])
+            #best_action = max(self.q_table[(x, y, 0)])
+            #print("best action index: " + str(best_action))
+            row += action_symbols[best_action] + "|"
+        print(row)
+        print("-" * (grid_size[0] * 2 + 1))
+
+with open(to_open + ".pkl", 'rb') as f:
+    q_table = pickle.load(f)
+    print("Raw data: " + str(q_table))
+    print_policy()
