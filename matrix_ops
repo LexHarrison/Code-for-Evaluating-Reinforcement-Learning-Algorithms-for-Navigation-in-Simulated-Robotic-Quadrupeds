@@ -1,0 +1,128 @@
+# matrix ops
+import numpy as np
+
+def matrix_to_quaternion(matrix):
+    """
+    Convert a 3x3 orthogonal matrix to a quaternion.
+    
+    Args:
+        matrix: A flattened or 3x3 rotation matrix
+        
+    Returns:
+        A quaternion [w, x, y, z] representing the rotation
+    """
+    # Ensure the matrix is 3x3
+    if len(matrix) == 9:
+        # Reshape the flattened matrix
+        matrix = np.array(matrix).reshape(3, 3)
+    
+    # Check if we have a valid rotation matrix
+    if not np.allclose(np.dot(matrix, matrix.T), np.eye(3), rtol=1e-5, atol=1e-5):
+        print("Warning: Input may not be a valid orthogonal matrix")
+    
+    trace = np.trace(matrix)
+    
+    if trace > 0:
+        # If the trace is positive
+        S = np.sqrt(trace + 1.0) * 2
+        w = 0.25 * S
+        x = (matrix[2, 1] - matrix[1, 2]) / S
+        y = (matrix[0, 2] - matrix[2, 0]) / S
+        z = (matrix[1, 0] - matrix[0, 1]) / S
+    
+    elif matrix[0, 0] > matrix[1, 1] and matrix[0, 0] > matrix[2, 2]:
+        # If matrix[0,0] is the largest diagonal element
+        S = np.sqrt(1.0 + matrix[0, 0] - matrix[1, 1] - matrix[2, 2]) * 2
+        w = (matrix[2, 1] - matrix[1, 2]) / S
+        x = 0.25 * S
+        y = (matrix[0, 1] + matrix[1, 0]) / S
+        z = (matrix[0, 2] + matrix[2, 0]) / S
+    
+    elif matrix[1, 1] > matrix[2, 2]:
+        # If matrix[1,1] is the largest diagonal element
+        S = np.sqrt(1.0 + matrix[1, 1] - matrix[0, 0] - matrix[2, 2]) * 2
+        w = (matrix[0, 2] - matrix[2, 0]) / S
+        x = (matrix[0, 1] + matrix[1, 0]) / S
+        y = 0.25 * S
+        z = (matrix[1, 2] + matrix[2, 1]) / S
+    
+    else:
+        # If matrix[2,2] is the largest diagonal element
+        S = np.sqrt(1.0 + matrix[2, 2] - matrix[0, 0] - matrix[1, 1]) * 2
+        w = (matrix[1, 0] - matrix[0, 1]) / S
+        x = (matrix[0, 2] + matrix[2, 0]) / S
+        y = (matrix[1, 2] + matrix[2, 1]) / S
+        z = 0.25 * S
+    
+    # Return as [w, x, y, z]
+    return [w, x, y, z]
+
+## TO EULER FUCKERY
+
+def quaternion_to_euler(quaternion):
+    """
+    Convert a quaternion to Euler angles (in radians).
+    
+    Args:
+        quaternion: A quaternion in the form [w, x, y, z]
+        
+    Returns:
+        Euler angles [roll, pitch, yaw] in radians using ZYX convention
+        (also known as roll, pitch, yaw or Tait-Bryan angles)
+    """
+    # Extract quaternion components
+    w, x, y, z = quaternion
+    
+    # Normalize the quaternion
+    norm = np.sqrt(w*w + x*x + y*y + z*z)
+    w /= norm
+    x /= norm
+    y /= norm
+    z /= norm
+    
+    # Roll (rotation around X-axis)
+    sinr_cosp = 2 * (w * x + y * z)
+    cosr_cosp = 1 - 2 * (x * x + y * y)
+    roll = np.arctan2(sinr_cosp, cosr_cosp)
+    
+    # Pitch (rotation around Y-axis)
+    sinp = 2 * (w * y - z * x)
+    if abs(sinp) >= 1:
+        # Use 90 degrees if out of range
+        pitch = np.copysign(np.pi / 2, sinp)
+    else:
+        pitch = np.arcsin(sinp)
+    
+    # Yaw (rotation around Z-axis)
+    siny_cosp = 2 * (w * z + x * y)
+    cosy_cosp = 1 - 2 * (y * y + z * z)
+    yaw = np.arctan2(siny_cosp, cosy_cosp)
+    
+    return np.array([roll, pitch, yaw])
+
+def euler_to_degrees(euler_angles):
+    """
+    Convert Euler angles from radians to degrees.
+    
+    Args:
+        euler_angles: Euler angles [roll, pitch, yaw] in radians
+        
+    Returns:
+        Euler angles in degrees
+    """
+    return np.degrees(euler_angles)
+
+"""
+# Example usage
+if __name__ == "__main__":
+    # Example quaternion [w, x, y, z]
+    quaternion = [0.7071, 0, 0.7071, 0]  # 90-degree rotation around Y axis
+    
+    # Convert to Euler angles (in radians)
+    euler_rad = quaternion_to_euler(quaternion)
+    print(f"Euler angles (radians): {euler_rad}")
+    
+    # Convert to degrees
+    euler_deg = euler_to_degrees(euler_rad)
+    print(f"Euler angles (degrees): {euler_deg}")
+    """
