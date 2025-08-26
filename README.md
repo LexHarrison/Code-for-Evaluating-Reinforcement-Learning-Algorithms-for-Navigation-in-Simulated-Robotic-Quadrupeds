@@ -11,34 +11,63 @@ This README provides setup and usage instructions for running the robot in diffe
 Ensure you unzip the project archive and maintain the original folder structure. This is essential for Webots to correctly reference controller paths and resources.
 
 Code-for-Evaluating-Reinforcement-Learning-Algorithms-for-Navigation-in-Simulated-Robotic-Quadrupeds/
+
 ├── simple_environment/
+
 │   ├── PPO/  (same internal layout as below)
+
 │   ├── DQN/
+
 │   └── Q/
+
 └── dynamic_environment/
+
     ├── PPO/
+    
     │   ├── controllers/
+    
     │   │   ├── run_ppo/               # robot controller + PPO training/eval code
+    
     │   │   ├── run_pedestrian/        # (dynamic env) moving obstacle controller
+    
     │   │   └── supervisor_controller/ # episode reset, metrics, IPC
+    
     │   └── worlds/
+    
     │       ├── bioloid_dog.wbt
+    
     │       └── bioloid_dog_complex.wbt
+    
     ├── DQN/
+    
     │   ├── controllers/
+    
     │   │   ├── run_dqn/               # robot controller + DQN (replay, target net)
+    
     │   │   ├── run_pedestrian/
+    
     │   │   └── supervisor_controller/
+    
     │   └── worlds/
+    
     │       ├── bioloid_dog.wbt
+    
     │       └── bioloid_dog_complex.wbt
+    
     └── Q/
+    
         ├── controllers/
+        
         │   ├── run_q/                 # robot controller + tabular Q-learning
+        
         │   ├── run_pedestrian/
+        
         │   └── supervisor_controller/
+        
         └── worlds/
+        
             ├── bioloid_dog.wbt
+            
             └── bioloid_dog_complex.wbt
 
 
