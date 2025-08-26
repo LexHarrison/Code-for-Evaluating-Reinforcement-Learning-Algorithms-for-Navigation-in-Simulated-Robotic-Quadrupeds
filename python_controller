@@ -1,0 +1,386 @@
+# Python controller
+# Copyright 1996-2024 Cyberbotics Ltd.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+import math
+import time
+import random
+from controller import Robot, Keyboard, Motor, PositionSensor, Camera, GPS, InertialUnit, Lidar
+
+# Constants
+MAX_MOTORS = 16
+SIMULATION_STEP_DURATION = 16
+
+# Motor indices
+PELVIS = 0
+FRONT_LEFT_1 = 1
+FRONT_RIGHT_1 = 2
+FRONT_LEFT_2 = 3
+FRONT_RIGHT_2 = 4
+FRONT_LEFT_3 = 5
+FRONT_RIGHT_3 = 6
+BACK_LEFT_1 = 7
+BACK_RIGHT_1 = 8
+BACK_LEFT_2 = 9
+BACK_RIGHT_2 = 10
+BACK_LEFT_3 = 11
+BACK_RIGHT_3 = 12
+NECK_1 = 13
+NECK_2 = 14
+HEAD = 15
+
+# Leg lengths
+L1 = 9    # UPPER_LEG_LENGTH [cm]
+L2 = 8.5  # LOWER_LEG_LENGTH [cm]
+
+class BioloidRobot:
+    # List of motors
+    MOTOR_NAMES = [
+        "pelvis",
+        "front_left_1",
+        "front_right_1",
+        "front_left_2",
+        "front_right_2",
+        "front_left_3",
+        "front_right_3",
+        "back_left_1",
+        "back_right_1",
+        "back_left_2",
+        "back_right_2",
+        "back_left_3",
+        "back_right_3",
+        "neck_1",
+        "neck_2",
+        "head"
+    ]
+
+    # List of possible walking gaits
+    GAIT_NAMES = ["trot", "walk", "gallop(transverse)", "canter", "pace", "bound", "pronk"]
+
+    GAIT_PHASE_SHIFT = [
+        [0, 0.5, 0, 0.5],      # trot
+        [0, 0.5, 0.25, 0.75],  # walk
+        [0, 0.1, 0.6, 0.5],    # gallop (transverse)
+        [0, 0.3, 0, 0.7],      # canter
+        [0, 0.5, 0.5, 0],      # pace
+        [0, 0, 0.5, 0.5],      # bound
+        [0, 0, 0, 0]           # pronk
+    ]
+
+    GAIT_SETUP = [
+        [FRONT_LEFT_1, FRONT_LEFT_3],
+        [FRONT_RIGHT_1, FRONT_RIGHT_3],
+        [BACK_RIGHT_1, BACK_RIGHT_3],
+        [BACK_LEFT_1, BACK_LEFT_3]
+    ]
+
+    def __init__(self, wb_robot):
+        self._robot = wb_robot
+        self._name = wb_robot.getName()
+        self._control_step = SIMULATION_STEP_DURATION
+        self._step_count = 0
+        
+        # Initialize motors and position sensors
+        self.motors = []
+        self.position_sensors = []
+        
+        for motor_name in self.MOTOR_NAMES:
+            motor = self._robot.getDevice(motor_name)
+            self.motors.append(motor)
+            
+            position_sensor = motor.getPositionSensor()
+            position_sensor.enable(self._control_step)
+            self.position_sensors.append(position_sensor)
+        
+        # Set up GPS
+        self._gps = self._robot.getDevice("gps")
+        self._gps.enable(self._control_step)
+        print(f"gps device tag is {self._gps}")
+        print("VStest")
+        
+        # Set up IMU
+        self._imu = self._robot.getDevice("imu")
+        self._imu.enable(self._control_step)
+        print(f"imu device tag is {self._imu}")
+        
+        # Set up lidar
+        try:
+            self._lidar = self._robot.getDevice("lidar")
+            self._lidar.enable(self._control_step)
+            self._lidar.enablePointCloud()
+            lidar_resolution = self._lidar.getHorizontalResolution()
+            print(f"Lidar initialized with resolution: {lidar_resolution}")
+        except:
+            self._lidar = None
+            print("ERROR: LiDAR device not found!")
+            print("not working")
+        
+        # Set up camera
+        self._camera = None
+        
+        # Keyboard
+        self._keyboard = self._robot.getKeyboard()
+        self._keyboard.enable(self._control_step)
+
+    def read_lidar(self):
+        """Read and display lidar data"""
+        if not self._lidar:
+            print("Lidar not initialized.")
+            return
+            
+        lidar_data = self._lidar.getRangeImage()
+        resolution = self._lidar.getHorizontalResolution()
+        
+        if not lidar_data:
+            print("ERROR: No LiDAR data available!")
+            return
+            
+        print("Lidar readings: ", end="")
+        for i in range(0, resolution, resolution // 10):  # Print 10 sample values
+            print(f"{lidar_data[i]:.2f} ", end="")
+        print()
+
+    def set_motor_position(self, motor_id, value):
+        """Set motor position"""
+        self.motors[motor_id].setPosition(value)
+
+    def get_motor_position(self, motor_id):
+        """Get motor position"""
+        return self.position_sensors[motor_id].getValue()
+
+    def enable_motor_position(self, motor_id):
+        """Enable the position sensor for the provided motor"""
+        self.position_sensors[motor_id].enable(self._control_step)
+
+    def init_camera(self):
+        """Initialize camera"""
+        self._camera = self._robot.getDevice("camera")
+        self._camera.enable(self._control_step)
+
+    def wait(self, seconds):
+        """Run simulation for X seconds"""
+        num_steps = int(seconds * 1000 / self._control_step)
+        for _ in range(num_steps):
+            self._robot.step(self._control_step)
+
+    def standing(self):
+        """Set the robot into standing position"""
+        self.set_motor_position(NECK_1, -math.pi / 2)
+        #End orig code
+        #Shoulder joint X axis
+        self.set_motor_position(FRONT_LEFT_1, -math.pi /4)
+        self.set_motor_position(FRONT_RIGHT_1, -math.pi /4)
+        self.set_motor_position(BACK_LEFT_1, -math.pi /4)
+        self.set_motor_position(BACK_RIGHT_1, -math.pi /4)
+        #Orig code, shoudler Y axis
+        self.set_motor_position(FRONT_LEFT_2, math.pi / 2)
+        self.set_motor_position(FRONT_RIGHT_2, -math.pi / 2)
+        self.set_motor_position(BACK_LEFT_2, math.pi / 2)
+        self.set_motor_position(BACK_RIGHT_2, -math.pi / 2)
+        #End orig code
+        #Knee joint
+        self.set_motor_position(FRONT_LEFT_3, math.pi / 2)
+        self.set_motor_position(FRONT_RIGHT_3, math.pi / 2)
+        self.set_motor_position(BACK_LEFT_3, math.pi / 2)
+        self.set_motor_position(BACK_RIGHT_3, math.pi / 2)
+        print("Set robot to standing positon.")
+        self.wait(1)
+
+    def compute_walking_position(self, t, gait_freq, gait_type, leg_id, stride_length_factor, backward):
+        """
+        Compute the position of the three motors according to the time
+        Returns [position_1, position_2]
+        """
+        # Proceed to reverse kinematic to compute leg position
+        freq = gait_freq
+        
+        # Compute modulo
+        n = int(t / (1 / freq))
+        t = t - n * (1 / freq)
+        
+        # Reverse time sequence for backward walk
+        if backward:
+            t = (1 / freq) - t
+            
+        # Ellipsoid parameters
+        a = 0.95 * L1 * stride_length_factor
+        h = 0
+        k = -(L1 + L2 / 2)
+        b = -k - math.sqrt(L1 * L1 + L2 * L2)
+        
+        # Compute ellipsoid points
+        x = h + a * math.cos(2 * math.pi * freq * t + self.GAIT_PHASE_SHIFT[gait_type][leg_id] * 2 * math.pi)
+        y = k + b * math.sin(2 * math.pi * freq * t + self.GAIT_PHASE_SHIFT[gait_type][leg_id] * 2 * math.pi)
+        
+        # Compute angle A2
+        A2 = math.acos((x * x + y * y - L1 * L1 - L2 * L2) / (2 * L1 * L2))
+        
+        # Compute angle A1
+        A1 = math.acos(((L1 + L2 * math.cos(A2)) * x - (-L2 * math.sin(A2)) * y) / 
+                       ((L1 + L2 * math.cos(A2))**2 + (-L2 * math.sin(A2))**2))
+        
+        # Subtract 2PI
+        A1 = math.pi / 2 - A1
+        
+        return [A1, A2]
+
+    def interactive_walk(self):
+        """Interactive walking mode with keyboard control"""
+        gait_type = 0
+        key = -1
+        
+        backward = False  # Is robot walking backward
+        
+        # Stride length parameters
+        slf = 1
+        slf_min = 0
+        slf_max = 1
+        stride_length_factor = [slf, slf, slf, slf]
+        
+        # Frequency parameters
+        freq_min = 0.4
+        freq_max = 2
+        freq = 1.5
+        freq_offset = 0.2
+        
+        # Turn amount parameters
+        ta_factor = [0, 0, 0, 0]
+        ta_min = -0.6
+        ta_max = 0.6
+        ta_offset = 0.6
+        
+        display_info = False
+        
+        while True:
+            # Get keyboard input
+            prev_key = key
+            key = self._keyboard.getKey()
+            
+            self.read_lidar()  # Get and display LiDAR readings
+            
+            self._robot.step(self._control_step)
+            self._step_count += 1
+            
+            if key != prev_key and key != -1:
+                # Update variables according to key value
+                if key == Keyboard.RIGHT:
+                    for i in range(4):
+                        if i == 0 or i == 3:
+                            ta_factor[i] += ta_offset
+                        else:
+                            ta_factor[i] -= ta_offset
+                        ta_factor[i] = max(ta_min, min(ta_max, ta_factor[i]))
+                    display_info = True
+                    
+                elif key == Keyboard.LEFT:
+                    for i in range(4):
+                        if i == 0 or i == 3:
+                            ta_factor[i] -= ta_offset
+                        else:
+                            ta_factor[i] += ta_offset
+                        ta_factor[i] = max(ta_min, min(ta_max, ta_factor[i]))
+                    display_info = True
+                    
+                elif key == ord('F'):
+                    backward = False
+                    freq = 1.5
+                    display_info = True
+                    
+                elif key == ord('B'):
+                    backward = True
+                    freq = 0.9
+                    display_info = True
+                    
+                elif key == ord('S'):
+                    slf += 0.1
+                    display_info = True
+                    
+                elif key == ord('A'):
+                    slf -= 0.1
+                    display_info = True
+                    
+                elif key == ord('Q'):
+                    freq += freq_offset
+                    display_info = True
+                    
+                elif key == ord('W'):
+                    freq -= freq_offset
+                    display_info = True
+                
+                # Bound values
+                freq = max(freq_min, min(freq_max, freq))
+                slf = max(slf_min, min(slf_max, slf))
+                
+                # Update stride_length_factor for each leg
+                for i in range(4):
+                    stride_length_factor[i] = ta_factor[i] + slf
+                    # Bound stride length
+                    stride_length_factor[i] = max(slf_min, min(slf_max, stride_length_factor[i]))
+            
+            # Display walking gait information
+            if display_info:
+                # Display freq + turn amount
+                print(f"freq:{freq}, slf:{slf}, backward:{int(backward)}")
+                for i in range(4):
+                    print(f"leg[{i}] ta:{ta_factor[i]}, slf:{stride_length_factor[i]}")
+                display_info = False
+            
+            # Compute motors position for each leg
+            for leg_id in range(4):
+                motor_positions = self.compute_walking_position(
+                    self._step_count * (self._control_step / 1000),
+                    freq, 
+                    gait_type, 
+                    leg_id,
+                    stride_length_factor[leg_id], 
+                    backward
+                )
+                self.set_motor_position(self.GAIT_SETUP[leg_id][0], motor_positions[0])
+                self.set_motor_position(self.GAIT_SETUP[leg_id][1], motor_positions[1])
+            
+            # Simulator step
+            self._robot.step(self._control_step)
+            self._step_count += 1
+
+
+def main():
+    """Main function"""
+    # Initialize the robot
+    random.seed(time.time())
+    webots_robot = Robot()
+    robot_name = webots_robot.getName()
+    robot = BioloidRobot(webots_robot)
+    
+    # Enable keyboard
+    robot.init_camera()
+    robot.standing()
+    
+    # Display commands
+    commands = [
+        "Select the 3D window and use the keyboard:\n",
+        "<- = Turn Left, -> = Turn Right, F = Walk Forward, B = Walk Backward\n",
+        "Q = Increase frequency, W = Decrease frequency\n",
+        "S = Increase stride length factor, A = Decrease stride length factor\n"
+    ]
+    
+    for command in commands:
+        print(command, end="")
+    
+    # Start interactive walking
+    robot.interactive_walk()
+    
+    return 0
+
+if __name__ == "__main__":
+    main()
