@@ -95,7 +95,7 @@ Code-for-Evaluating-Reinforcement-Learning-Algorithms-for-Navigation-in-Simulate
    - **Important:** The name of the controller must match the folder name inside `/controllers/`.
 
    If using `dynamic_environment.wbt`:
-   - Also assign a controller to the **Pedestrian** robot (e.g. `run_pedestrian` if required).
+   - Also assign a controller to the **Pedestrian** robot (e.g. `run_pedestrian` when and if required).
 
 4. **Run the Simulation**
    - Click the **Play** button in Webots to start.
@@ -109,6 +109,7 @@ Code-for-Evaluating-Reinforcement-Learning-Algorithms-for-Navigation-in-Simulate
 - If the robot doesn't move:
   - Make sure you've selected the correct controller.
   - Check terminal output for warnings/errors (e.g., `generic` controller, invalid state etc).
+- Place all files in appropriate folder, i.e PPO will require only PPO's files and the same for DQN and Q tags. However, each algorithm will share 'balance', 'maze_navigation', 'sensor_tuning' e.t.c. shared files.
 - Training was ran on a capped 20,000 episodes (which isn't nearly enough for PPO and DQN to truly benefit on the dynamic maps.) PPO and DQN use neural networks, so learning takes time. I have deleted all pre-trained models as there were thousands for each algorithm in each environment (as expected approx 20,000) which was taking up space, and ran at a cap. So please allow training from scratch.
 - Simulation speed may vary based on your computer's processing power – complex environments can take longer to run, expect issues with the amount of computational power required. Also running over GPU will cause less strain than CPU.
 
