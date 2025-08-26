@@ -72,7 +72,7 @@ preferred-citation:
   - title: Evaluating Reinforcement Learning Algorithms for Navigation in Simulated Robotic Quadrupeds
   - authors:
     - family names: Harrison
-      first names: Emma
+    - first names: Emma
   - license: Apache-2.0
   - journal: arXiv
   - year: 2025
