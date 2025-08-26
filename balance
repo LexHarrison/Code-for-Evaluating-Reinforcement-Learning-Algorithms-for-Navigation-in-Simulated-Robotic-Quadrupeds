@@ -1,0 +1,430 @@
+# balance.py
+import math
+import time
+# Import motor indices from python_controller
+from python_controller import FRONT_LEFT_1, FRONT_RIGHT_1, FRONT_LEFT_2, FRONT_RIGHT_2, FRONT_LEFT_3, FRONT_RIGHT_3
+from python_controller import BACK_LEFT_1, BACK_RIGHT_1, BACK_LEFT_2, BACK_RIGHT_2, BACK_LEFT_3, BACK_RIGHT_3
+from python_controller import NECK_1, NECK_2, HEAD, PELVIS
+
+class BalanceController:
+    def __init__(self, robot):
+        self.robot = robot
+        self.roll_offset = 0
+        self.pitch_offset = 0
+        
+        # PID controller parameters for balance
+        self.kp_roll = 0.3
+        self.ki_roll = 0.05
+        self.kd_roll = 0.1
+        self.kp_pitch = 0.3
+        self.ki_pitch = 0.05
+        self.kd_pitch = 0.1
+        
+        self.prev_roll_error = 0
+        self.prev_pitch_error = 0
+        self.roll_error_sum = 0
+        self.pitch_error_sum = 0
+        
+        # Balance thresholds
+        self.mild_imbalance_threshold = 0.3  # Radians - minor correction
+        self.severe_imbalance_threshold = 0.6  # Radians - aggressive correction
+        self.fallen_threshold = 1.0  # Reduced from 1.2 to detect falls earlier
+        
+        # Recovery state
+        self.in_recovery = False
+        
+    def calibrate(self, num_samples=50):
+        """Calibrate IMU by determining the offset values."""
+        roll_sum = 0
+        pitch_sum = 0
+        for _ in range(num_samples):
+            roll, pitch, _ = self.get_orientation()
+            roll_sum += roll
+            pitch_sum += pitch
+            self.robot._robot.step(self.robot._control_step)
+        
+        self.roll_offset = roll_sum / num_samples
+        self.pitch_offset = pitch_sum / num_samples
+        print(f"IMU calibrated. Roll offset: {self.roll_offset}, Pitch offset: {self.pitch_offset}")
+        
+    def get_orientation(self):
+        """Get the roll, pitch, yaw from IMU.
+        IMPORTANT: Returns values in order [roll, pitch, yaw] for consistency."""
+        if self.robot._imu:
+            rot_matrix = self.robot._imu.getRollPitchYaw()
+            roll = rot_matrix[0]  # X-axis rotation
+            pitch = rot_matrix[1]  # Y-axis rotation
+            yaw = rot_matrix[2]    # Z-axis rotation
+            # Debug prints for calibration
+            if abs(roll) > 0.5 or abs(pitch) > 0.5:
+                print(f"ORIENTATION - Roll: {roll:.2f}, Pitch: {pitch:.2f}, Yaw: {yaw:.2f}")
+            return roll, pitch, yaw
+        return 0, 0, 0
+    
+    def is_slightly_imbalanced(self):
+        """Detect if the robot is slightly imbalanced but not falling."""
+        roll, pitch, _ = self.get_orientation()
+        roll = roll - self.roll_offset
+        pitch = pitch - self.pitch_offset
+        
+        # Check if roll or pitch exceeds mild threshold but not severe
+        return (self.mild_imbalance_threshold < max(abs(roll), abs(pitch)) < self.severe_imbalance_threshold)
+    
+    def is_falling(self):
+        """Detect if the robot is severely falling but not yet fallen."""
+        roll, pitch, _ = self.get_orientation()
+        roll = roll - self.roll_offset
+        pitch = pitch - self.pitch_offset
+        
+        # Check if roll or pitch exceeds severe threshold but not fallen threshold
+        is_falling_state = (self.severe_imbalance_threshold < max(abs(roll), abs(pitch)) < self.fallen_threshold)
+        
+        if is_falling_state:
+            print(f"BALANCECONT: Robot is falling - Roll: {roll:.2f}, Pitch: {pitch:.2f}")
+        
+        return is_falling_state
+    
+    def is_fallen(self):
+        """Detect if the robot has completely fallen."""
+        roll, pitch, _ = self.get_orientation()
+        roll = roll - self.roll_offset
+        pitch = pitch - self.pitch_offset
+        
+        # Check if roll or pitch exceeds fallen threshold
+        is_fallen_state = (abs(roll) > self.fallen_threshold or abs(pitch) > self.fallen_threshold)
+        
+        if is_fallen_state and not self.in_recovery:
+            print(f"BALANCECONT: Robot has fallen - Roll: {roll:.2f}, Pitch: {pitch:.2f}")
+        
+        return is_fallen_state
+    
+    def apply_balance_correction(self):
+        """Apply appropriate balance correction based on IMU data."""
+        # Check if robot is in recovery mode
+        if self.in_recovery:
+            print("BALANCECONT: Robot in recovery mode, doing nothing...")
+            return
+            
+        # Check if robot has fallen
+        if self.is_fallen():
+            print("BALANCECONT: Robot has fallen. Initiating recovery sequence...")
+            self.recovery_sequence()
+            return
+            
+        # Check if robot is falling
+        if self.is_falling():
+            print("BALANCECONT: Robot is severely imbalanced (is_falling). Applying aggressive correction...")
+            self.apply_aggressive_correction()
+            return
+            
+        # Check if robot is slightly imbalanced
+        if self.is_slightly_imbalanced():
+            print("BALANCECONT: Robot is slightly imbalanced. Applying mild correction...")
+            self.apply_mild_correction()
+            return
+    
+    def apply_mild_correction(self):
+        """Apply mild balance correction for slight imbalance."""
+        roll, pitch, _ = self.get_orientation()
+        roll = roll - self.roll_offset
+        pitch = pitch - self.pitch_offset
+        
+        # PID control for roll - mild correction
+        roll_error = 0 - roll
+        self.roll_error_sum = max(-2, min(2, self.roll_error_sum + roll_error))  # Limit integral windup
+        roll_error_diff = roll_error - self.prev_roll_error
+        roll_correction = (self.kp_roll * roll_error + 
+                          self.ki_roll * self.roll_error_sum + 
+                          self.kd_roll * roll_error_diff) * 0.5  # Reduce correction intensity
+        
+        # PID control for pitch - mild correction
+        pitch_error = 0 - pitch
+        self.pitch_error_sum = max(-2, min(2, self.pitch_error_sum + pitch_error))
+        pitch_error_diff = pitch_error - self.prev_pitch_error
+        pitch_correction = (self.kp_pitch * pitch_error + 
+                           self.ki_pitch * self.pitch_error_sum + 
+                           self.kd_pitch * pitch_error_diff) * 0.5  # Reduce correction intensity
+        
+        # Update previous errors
+        self.prev_roll_error = roll_error
+        self.prev_pitch_error = pitch_error
+        
+        # Apply corrections to motors
+        front_adjustment = pitch_correction * 0.1
+        back_adjustment = -pitch_correction * 0.1
+        left_adjustment = roll_correction * 0.1
+        right_adjustment = -roll_correction * 0.1
+        
+        # Get current positions and apply adjustments
+        fl2_pos = self.robot.get_motor_position(FRONT_LEFT_2)
+        fr2_pos = self.robot.get_motor_position(FRONT_RIGHT_2)
+        bl2_pos = self.robot.get_motor_position(BACK_LEFT_2)
+        br2_pos = self.robot.get_motor_position(BACK_RIGHT_2)
+        
+        self.robot.set_motor_position(FRONT_LEFT_2, fl2_pos + front_adjustment + left_adjustment)
+        self.robot.set_motor_position(FRONT_RIGHT_2, fr2_pos + front_adjustment + right_adjustment)
+        self.robot.set_motor_position(BACK_LEFT_2, bl2_pos + back_adjustment + left_adjustment)
+        self.robot.set_motor_position(BACK_RIGHT_2, br2_pos + back_adjustment + right_adjustment)
+    
+    def apply_aggressive_correction(self):
+        """Apply aggressive balance correction when severely imbalanced."""
+        roll, pitch, _ = self.get_orientation()
+        roll = roll - self.roll_offset
+        pitch = pitch - self.pitch_offset
+        
+        # PID control for roll - aggressive correction
+        roll_error = 0 - roll
+        self.roll_error_sum = max(-3, min(3, self.roll_error_sum + roll_error))
+        roll_error_diff = roll_error - self.prev_roll_error
+        roll_correction = (self.kp_roll * 2 * roll_error +  # Double the P gain
+                          self.ki_roll * self.roll_error_sum + 
+                          self.kd_roll * 1.5 * roll_error_diff)  # Increase D gain
+        
+        # PID control for pitch - aggressive correction
+        pitch_error = 0 - pitch
+        self.pitch_error_sum = max(-3, min(3, self.pitch_error_sum + pitch_error))
+        pitch_error_diff = pitch_error - self.prev_pitch_error
+        pitch_correction = (self.kp_pitch * 2 * pitch_error +  # Double the P gain
+                           self.ki_pitch * self.pitch_error_sum + 
+                           self.kd_pitch * 1.5 * pitch_error_diff)  # Increase D gain
+        
+        # Update previous errors
+        self.prev_roll_error = roll_error
+        self.prev_pitch_error = pitch_error
+        
+        # Apply stronger corrections to motors
+        front_adjustment = pitch_correction * 0.3  # Stronger adjustment
+        back_adjustment = -pitch_correction * 0.3
+        left_adjustment = roll_correction * 0.3
+        right_adjustment = -roll_correction * 0.3
+        
+        # Adjust all leg joints for better stability
+        # Second joints (knees)
+        fl2_pos = self.robot.get_motor_position(FRONT_LEFT_2)
+        fr2_pos = self.robot.get_motor_position(FRONT_RIGHT_2)
+        bl2_pos = self.robot.get_motor_position(BACK_LEFT_2)
+        br2_pos = self.robot.get_motor_position(BACK_RIGHT_2)
+        
+        # First joints (shoulders)
+        fl1_pos = self.robot.get_motor_position(FRONT_LEFT_1)
+        fr1_pos = self.robot.get_motor_position(FRONT_RIGHT_1)
+        bl1_pos = self.robot.get_motor_position(BACK_LEFT_1)
+        br1_pos = self.robot.get_motor_position(BACK_RIGHT_1)
+        
+        # Apply corrections to second joints (knees)
+        self.robot.set_motor_position(FRONT_LEFT_2, fl2_pos + front_adjustment + left_adjustment)
+        self.robot.set_motor_position(FRONT_RIGHT_2, fr2_pos + front_adjustment + right_adjustment)
+        self.robot.set_motor_position(BACK_LEFT_2, bl2_pos + back_adjustment + left_adjustment)
+        self.robot.set_motor_position(BACK_RIGHT_2, br2_pos + back_adjustment + right_adjustment)
+        
+        # Apply corrections to first joints (shoulders)
+        self.robot.set_motor_position(FRONT_LEFT_1, fl1_pos - left_adjustment)
+        self.robot.set_motor_position(FRONT_RIGHT_1, fr1_pos - right_adjustment)
+        self.robot.set_motor_position(BACK_LEFT_1, bl1_pos - left_adjustment)
+        self.robot.set_motor_position(BACK_RIGHT_1, br1_pos - right_adjustment)
+        
+        # Also adjust third joints (ankles) if needed
+        fl3_pos = self.robot.get_motor_position(FRONT_LEFT_3)
+        fr3_pos = self.robot.get_motor_position(FRONT_RIGHT_3)
+        bl3_pos = self.robot.get_motor_position(BACK_LEFT_3)
+        br3_pos = self.robot.get_motor_position(BACK_RIGHT_3)
+        
+        self.robot.set_motor_position(FRONT_LEFT_3, fl3_pos - left_adjustment * 0.5)
+        self.robot.set_motor_position(FRONT_RIGHT_3, fr3_pos - right_adjustment * 0.5)
+        self.robot.set_motor_position(BACK_LEFT_3, bl3_pos - left_adjustment * 0.5)
+        self.robot.set_motor_position(BACK_RIGHT_3, br3_pos - right_adjustment * 0.5)
+    
+    def recovery_sequence(self):
+        """Execute a recovery sequence to get the robot back on its feet."""
+        self.in_recovery = True
+        print("Starting recovery sequence...")
+        
+        try:
+            # First, determine how the robot has fallen
+            roll, pitch, _ = self.get_orientation()
+            roll = roll - self.roll_offset
+            pitch = pitch - self.pitch_offset
+            
+            # Reset all motors to neutral position first
+            self.reset_all_motors()
+            
+            # Wait for motors to reach positions
+            self.robot.wait(0.5)
+            
+            # Execute appropriate recovery sequence based on how robot has fallen
+            if abs(roll) > abs(pitch):
+                # Robot has fallen on its side
+                if roll > 0:
+                    self.recover_from_right_side()
+                else:
+                    self.recover_from_left_side()
+            else:
+                # Robot has fallen on its front or back
+                if pitch > 0:
+                    self.recover_from_back()
+                else:
+                    self.recover_from_front()
+            
+            # After recovery sequence, return to standing position
+            self.return_to_standing()
+            
+            # Check if we've successfully recovered
+            recovered = not self.is_fallen()
+            if recovered:
+                print("Recovery sequence completed successfully.")
+            else:
+                print("Recovery attempt failed, robot is still fallen.")
+            
+        except Exception as e:
+            print(f"Error in recovery sequence: {e}")
+        finally:
+            self.in_recovery = False
+    
+    def reset_all_motors(self):
+        """Reset all motors to neutral positions."""
+        print("Resetting all motors...")
+        
+        # Set all motors to zero (neutral) position
+        for motor_id in range(len(self.robot.motors)):
+            if motor_id != PELVIS:  # Leave pelvis alone
+                self.robot.set_motor_position(motor_id, 0)
+        
+        # Allow time for motors to reach position
+        self.robot.wait(0.3)
+    
+    def recover_from_right_side(self):
+        """Recovery sequence when robot has fallen on its right side."""
+        print("Recovering from right side...")
+        
+        # Stage 1: Prepare to push up
+        self.robot.set_motor_position(FRONT_LEFT_1, -math.pi/2)
+        self.robot.set_motor_position(BACK_LEFT_1, -math.pi/2)
+        self.robot.set_motor_position(FRONT_RIGHT_1, math.pi/2)
+        self.robot.set_motor_position(BACK_RIGHT_1, math.pi/2)
+        
+        self.robot.set_motor_position(FRONT_LEFT_2, math.pi/2)
+        self.robot.set_motor_position(BACK_LEFT_2, math.pi/2)
+        self.robot.set_motor_position(FRONT_RIGHT_2, -math.pi/2)
+        self.robot.set_motor_position(BACK_RIGHT_2, -math.pi/2)
+        
+        self.robot.wait(0.5)
+        
+        # Stage 2: Push up with left legs
+        self.robot.set_motor_position(FRONT_LEFT_1, -math.pi/6)
+        self.robot.set_motor_position(BACK_LEFT_1, -math.pi/6)
+        self.robot.set_motor_position(FRONT_LEFT_2, math.pi/3)
+        self.robot.set_motor_position(BACK_LEFT_2, math.pi/3)
+        
+        self.robot.wait(0.5)
+        
+        # Stage 3: Continue pushing up
+        self.robot.set_motor_position(FRONT_LEFT_1, 0)
+        self.robot.set_motor_position(BACK_LEFT_1, 0)
+        
+        self.robot.wait(0.5)
+    
+    def recover_from_left_side(self):
+        """Recovery sequence when robot has fallen on its left side."""
+        print("Recovering from left side...")
+        
+        # Stage 1: Prepare to push up
+        self.robot.set_motor_position(FRONT_LEFT_1, -math.pi/2)
+        self.robot.set_motor_position(BACK_LEFT_1, -math.pi/2)
+        self.robot.set_motor_position(FRONT_RIGHT_1, math.pi/2)
+        self.robot.set_motor_position(BACK_RIGHT_1, math.pi/2)
+        
+        self.robot.set_motor_position(FRONT_LEFT_2, math.pi/2)
+        self.robot.set_motor_position(BACK_LEFT_2, math.pi/2)
+        self.robot.set_motor_position(FRONT_RIGHT_2, -math.pi/2)
+        self.robot.set_motor_position(BACK_RIGHT_2, -math.pi/2)
+        
+        self.robot.wait(0.5)
+        
+        # Stage 2: Push up with right legs
+        self.robot.set_motor_position(FRONT_RIGHT_1, math.pi/6)
+        self.robot.set_motor_position(BACK_RIGHT_1, math.pi/6)
+        self.robot.set_motor_position(FRONT_RIGHT_2, -math.pi/3)
+        self.robot.set_motor_position(BACK_RIGHT_2, -math.pi/3)
+        
+        self.robot.wait(0.5)
+        
+        # Stage 3: Continue pushing up
+        self.robot.set_motor_position(FRONT_RIGHT_1, 0)
+        self.robot.set_motor_position(BACK_RIGHT_1, 0)
+        
+        self.robot.wait(0.5)
+    
+    def recover_from_front(self):
+        """Recovery sequence when robot has fallen on its front."""
+        print("Recovering from front...")
+        
+        # Stage 1: Prepare legs
+        self.robot.set_motor_position(FRONT_LEFT_1, 0)
+        self.robot.set_motor_position(FRONT_RIGHT_1, 0)
+        self.robot.set_motor_position(BACK_LEFT_1, 0)
+        self.robot.set_motor_position(BACK_RIGHT_1, 0)
+        
+        self.robot.set_motor_position(FRONT_LEFT_2, math.pi/2)
+        self.robot.set_motor_position(FRONT_RIGHT_2, -math.pi/2)
+        self.robot.set_motor_position(BACK_LEFT_2, math.pi/2)
+        self.robot.set_motor_position(BACK_RIGHT_2, -math.pi/2)
+        
+        self.robot.wait(0.5)
+        
+        # Stage 2: Push up with front legs
+        self.robot.set_motor_position(FRONT_LEFT_2, math.pi/4)
+        self.robot.set_motor_position(FRONT_RIGHT_2, -math.pi/4)
+        
+        self.robot.wait(0.5)
+        
+        # Stage 3: Push up with back legs
+        self.robot.set_motor_position(BACK_LEFT_2, math.pi/4)
+        self.robot.set_motor_position(BACK_RIGHT_2, -math.pi/4)
+        
+        self.robot.wait(0.5)
+    
+    def recover_from_back(self):
+        """Recovery sequence when robot has fallen on its back."""
+        print("Recovering from back...")
+        
+        # Stage 1: Prepare legs
+        self.robot.set_motor_position(FRONT_LEFT_1, 0)
+        self.robot.set_motor_position(FRONT_RIGHT_1, 0)
+        self.robot.set_motor_position(BACK_LEFT_1, 0)
+        self.robot.set_motor_position(BACK_RIGHT_1, 0)
+        
+        self.robot.set_motor_position(FRONT_LEFT_2, math.pi/2)
+        self.robot.set_motor_position(FRONT_RIGHT_2, -math.pi/2)
+        self.robot.set_motor_position(BACK_LEFT_2, math.pi/2)
+        self.robot.set_motor_position(BACK_RIGHT_2, -math.pi/2)
+        
+        self.robot.wait(0.5)
+        
+        # Stage 2: Flip body using leg momentum
+        self.robot.set_motor_position(FRONT_LEFT_1, -math.pi/3)
+        self.robot.set_motor_position(FRONT_RIGHT_1, math.pi/3)
+        self.robot.set_motor_position(BACK_LEFT_1, -math.pi/3)
+        self.robot.set_motor_position(BACK_RIGHT_1, math.pi/3)
+        
+        self.robot.wait(0.3)
+        
+        # Quick flip motion
+        self.robot.set_motor_position(FRONT_LEFT_1, -math.pi/2)
+        self.robot.set_motor_position(FRONT_RIGHT_1, math.pi/2)
+        self.robot.set_motor_position(BACK_LEFT_1, -math.pi/2)
+        self.robot.set_motor_position(BACK_RIGHT_1, math.pi/2)
+        
+        self.robot.wait(0.5)
+        
+        # Now handle as if fallen on front
+        self.recover_from_front()
+    
+    def return_to_standing(self):
+        """Return to standing position after recovery."""
+        print("Returning to standing position...")
+        
+        # Restore standing position as defined in robot's standing method
+        self.robot.standing()
+        
+        # Give extra time for stabilization
+        self.robot.wait(0.5)
