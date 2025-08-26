@@ -68,12 +68,12 @@ Made with love (and a lot of tears) the University of Hertfordshire MSc AI & Rob
 ### For citation please note:
 
 preferred-citation:
-  type: article
-  title: Evaluating Reinforcement Learning Algorithms for Navigation in Simulated Robotic Quadrupeds
-  authors:
+  - type: article
+  - title: Evaluating Reinforcement Learning Algorithms for Navigation in Simulated Robotic Quadrupeds
+  - authors:
     - family-names: Harrison
       given-names: Emma
-  license: Apache-2.0
-  journal: arXiv
-  year: 2025
-  url: (http://arxiv.org/abs/2507.13277)
+  - license: Apache-2.0
+  - journal: arXiv
+  - year: 2025
+  - url: (http://arxiv.org/abs/2507.13277)
