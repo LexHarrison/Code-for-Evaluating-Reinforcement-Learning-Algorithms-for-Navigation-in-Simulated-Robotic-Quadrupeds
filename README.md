@@ -64,16 +64,3 @@ Ensure you unzip the project archive and maintain the original folder structure.
 ---
 
 Made with love (and a lot of tears) the University of Hertfordshire MSc AI & Robotics programme.
-
-### For citation please note:
-
-preferred-citation:
-  - type: article
-  - title: Evaluating Reinforcement Learning Algorithms for Navigation in Simulated Robotic Quadrupeds
-  - authors:
-    - family names: Harrison
-    - first names: Emma
-  - license: Apache-2.0
-  - journal: arXiv
-  - year: 2025
-  - url: (http://arxiv.org/abs/2507.13277)
