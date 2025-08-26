@@ -1,0 +1,58 @@
+# run pedestrian
+#!/usr/bin/env python3
+
+"""
+Script to launch the pedestrian with appropriate trajectory parameters
+for walking back and forth along the road in the complex bioloid world.
+"""
+
+import subprocess
+import sys
+import os
+import time
+
+def main():
+    """Run the pedestrian controller with appropriate parameters."""
+    
+    # Path to the pedestrian.py controller
+    controller_path = "pedestrian.py"
+    
+    # Define the trajectory that follows the road
+    trajectory = "-2.22707 -3.76293, 2.5 1.4"
+    
+    # These are the exact coordinates from the Pedestrian node in the world file
+    print("Current Pedestrian position in world file: -2.22707 -3.76293 1.27")
+    print("This can help you determine where to place waypoints")
+    
+    # Speed slow enough to be a natural walking pace
+    speed = 0.5
+    
+    # Construct command to run the controller
+    cmd = [sys.executable, controller_path, 
+           f"--trajectory={trajectory}",
+           f"--speed={speed}"]
+    
+    print(f"Starting pedestrian with trajectory: {trajectory}")
+    print(f"Walking speed: {speed} m/s")
+    print("Will walk along road and loop back to start")
+    
+    # Run the controller
+    try:
+        # Start the process and allow it to run in the background
+        process = subprocess.Popen(cmd, 
+                                 stdout=subprocess.PIPE,
+                                 stderr=subprocess.STDOUT,
+                                 universal_newlines=True)
+        
+        # Continuously read output
+        for line in process.stdout:
+            print(line, end='')
+            
+    except KeyboardInterrupt:
+        print("Pedestrian controller stopped by user")
+        process.terminate()
+    except Exception as e:
+        print(f"Error running pedestrian controller: {e}")
+
+if __name__ == "__main__":
+    main()
