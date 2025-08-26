@@ -1,0 +1,633 @@
+# enhanced_training_metrics.py
+import os
+import numpy as np
+import matplotlib.pyplot as plt
+from matplotlib.ticker import MaxNLocator
+from datetime import datetime
+import pickle
+
+print("Running script?")
+
+class EnhancedTrainingMetrics:
+    def __init__(self, algorithm_name, environment_name="default", results_dir="training_results"):
+        self.algorithm_name = algorithm_name
+        self.environment_name = environment_name
+        self.results_dir = results_dir
+        
+        # Episode data
+        self.episode_rewards = []
+        self.learning_rates = []
+        self.episode_steps = []
+        self.goal_reached_episodes = []
+        
+        # Goal statistics
+        self.total_goals_reached = 0
+        self.first_goal_reached_episode = None
+        self.goal_reach_intervals = []
+        self.last_goal_episode = 0
+        
+        # Success rate tracking (moving window)
+        self.window_size = 100  # Track success rate over 100-episode windows
+        self.success_rates = []  # Success rate per window
+        
+        # Full path for this algorithm/environment
+        self.algo_env_dir = os.path.join(results_dir, f"{algorithm_name}_{environment_name}")
+        os.makedirs(self.algo_env_dir, exist_ok=True)
+        
+        print(f"Enhanced metrics tracking initialized for {algorithm_name} on {environment_name}")
+    
+    def add_episode_data(self, episode_num, total_reward, learning_rate, steps, goal_reached=False):
+        """Record data for a completed episode"""
+        self.episode_rewards.append(total_reward)
+        self.learning_rates.append(learning_rate)
+        self.episode_steps.append(steps)
+        
+        # Track goal statistics
+        if goal_reached:
+            self.total_goals_reached += 1
+            self.goal_reached_episodes.append(episode_num)
+            
+            # Record first time goal was reached
+            if self.first_goal_reached_episode is None:
+                self.first_goal_reached_episode = episode_num
+            
+            # Record interval between goal reaches
+            if self.last_goal_episode > 0:
+                interval = episode_num - self.last_goal_episode
+                self.goal_reach_intervals.append(interval)
+            
+            self.last_goal_episode = episode_num
+            print(f"Goal reached in episode {episode_num}! Total goals reached: {self.total_goals_reached}")
+        
+        # Calculate success rate over moving window
+        if episode_num % self.window_size == 0 and episode_num > 0:
+            window_start = max(0, episode_num - self.window_size)
+            goals_in_window = sum(1 for ep in self.goal_reached_episodes if window_start < ep <= episode_num)
+            success_rate = goals_in_window / self.window_size
+            self.success_rates.append(success_rate)
+            print(f"Success rate over last {self.window_size} episodes: {success_rate:.2%}")
+        
+        # Print detailed metrics periodically
+        if episode_num % 100 == 0 or goal_reached:
+            self.print_detailed_metrics(episode_num)
+    
+    def print_detailed_metrics(self, episode_num):
+        """Print detailed metrics to console"""
+        # Calculate metrics for display
+        avg_reward = np.mean(self.episode_rewards[-100:]) if len(self.episode_rewards) >= 100 else np.mean(self.episode_rewards)
+        avg_steps = np.mean(self.episode_steps[-100:]) if len(self.episode_steps) >= 100 else np.mean(self.episode_steps)
+        recent_success_rate = 0
+        if len(self.goal_reached_episodes) > 0:
+            recent_episodes = range(max(1, episode_num - 100), episode_num + 1)
+            recent_goals = sum(1 for ep in self.goal_reached_episodes if ep in recent_episodes)
+            recent_success_rate = recent_goals / len(recent_episodes)
+        
+        # Prepare and print summary
+        print("\n" + "="*70)
+        print(f"METRICS SUMMARY AT EPISODE {episode_num}")
+        print(f"Algorithm: {self.algorithm_name}, Environment: {self.environment_name}")
+        print("-"*70)
+        print(f"Total goals reached: {self.total_goals_reached}")
+        print(f"First goal reached at episode: {self.first_goal_reached_episode or 'N/A'}")
+        print(f"Success rate (last 100 episodes): {recent_success_rate:.2%}")
+        print(f"Average reward (last 100 episodes): {avg_reward:.2f}")
+        print(f"Average steps (last 100 episodes): {avg_steps:.2f}")
+        print(f"Current learning/exploration rate: {self.learning_rates[-1]:.5f}")
+        if len(self.goal_reach_intervals) > 0:
+            print(f"Average episodes between goals: {np.mean(self.goal_reach_intervals):.2f}")
+        print("="*70 + "\n")
+    
+    def plot_rewards(self, smoothing=25):
+        """Plot episode rewards with optional smoothing"""
+        plt.figure(figsize=(12, 8))
+        
+        # Plot raw rewards
+        episodes = range(1, len(self.episode_rewards) + 1)
+        plt.plot(episodes, self.episode_rewards, alpha=0.2, label='Raw Reward', color='skyblue')
+        
+        # Plot smoothed rewards
+        if len(self.episode_rewards) > smoothing:
+            # Simple moving average
+            smoothed_rewards = []
+            for i in range(len(self.episode_rewards) - smoothing + 1):
+                smoothed_rewards.append(np.mean(self.episode_rewards[i:i+smoothing]))
+            
+            # Plot at the center of each window
+            smooth_x = range(smoothing // 2 + 1, len(self.episode_rewards) - smoothing // 2 + 1)
+            plt.plot(smooth_x, smoothed_rewards, label=f'SMA {smoothing}', color='blue', linewidth=2)
+        
+        # Mark episodes where goal was reached
+        if self.goal_reached_episodes:
+            # We don't want to mark every goal if there are too many, it would clutter the graph
+            # Instead, sample a reasonable number of goal episodes to mark
+            max_markers = 30
+            if len(self.goal_reached_episodes) > max_markers:
+                # Sample evenly spaced goal episodes
+                sample_indices = np.linspace(0, len(self.goal_reached_episodes)-1, max_markers, dtype=int)
+                sampled_episodes = [self.goal_reached_episodes[i] for i in sample_indices]
+            else:
+                sampled_episodes = self.goal_reached_episodes
+                
+            goal_rewards = [self.episode_rewards[i-1] for i in sampled_episodes]
+            plt.scatter(sampled_episodes, goal_rewards, color='green', marker='*', 
+                        s=100, label='Goal Reached', zorder=3)
+        
+        plt.xlabel('Episode')
+        plt.ylabel('Rewards')
+        plt.title(f'Episode Rewards - {self.algorithm_name} ({self.environment_name})')
+        plt.legend()
+        plt.grid(True, alpha=0.3)
+        
+        # Make x-axis use integer ticks
+        plt.gca().xaxis.set_major_locator(MaxNLocator(integer=True))
+        
+        # Save figure
+        timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        filename = f"{self.algo_env_dir}/rewards_{timestamp}.png"
+        plt.savefig(filename)
+        print(f"Saved rewards plot to {filename}")
+        
+        plt.close()
+    
+    def plot_learning_rate(self):
+        """Plot learning rate over time"""
+        plt.figure(figsize=(12, 6))
+        
+        episodes = range(1, len(self.learning_rates) + 1)
+        plt.plot(episodes, self.learning_rates, label='Learning/Exploration Rate', color='purple')
+        
+        plt.xlabel('Episode')
+        plt.ylabel('Learning/Exploration Rate')
+        plt.title(f'Learning Rate Decay - {self.algorithm_name} ({self.environment_name})')
+        plt.grid(True, alpha=0.3)
+        
+        # Make x-axis use integer ticks
+        plt.gca().xaxis.set_major_locator(MaxNLocator(integer=True))
+        
+        # Save figure
+        timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        filename = f"{self.algo_env_dir}/learning_rate_{timestamp}.png"
+        plt.savefig(filename)
+        print(f"Saved learning rate plot to {filename}")
+        
+        plt.close()
+    
+    def plot_steps_per_episode(self):
+        """Plot number of steps per episode"""
+        plt.figure(figsize=(12, 6))
+        
+        # Plot raw steps
+        episodes = range(1, len(self.episode_steps) + 1)
+        plt.plot(episodes, self.episode_steps, alpha=0.2, label='Raw Steps', color='lightgreen')
+        
+        # Plot smoothed steps (moving average)
+        smoothing = 25
+        if len(self.episode_steps) > smoothing:
+            smoothed_steps = []
+            for i in range(len(self.episode_steps) - smoothing + 1):
+                smoothed_steps.append(np.mean(self.episode_steps[i:i+smoothing]))
+            
+            # Plot at the center of each window
+            smooth_x = range(smoothing // 2 + 1, len(self.episode_steps) - smoothing // 2 + 1)
+            plt.plot(smooth_x, smoothed_steps, label=f'SMA {smoothing}', color='green', linewidth=2)
+        
+        plt.xlabel('Episode')
+        plt.ylabel('Steps')
+        plt.title(f'Steps per Episode - {self.algorithm_name} ({self.environment_name})')
+        plt.legend()
+        plt.grid(True, alpha=0.3)
+        
+        # Make x-axis use integer ticks
+        plt.gca().xaxis.set_major_locator(MaxNLocator(integer=True))
+        
+        # Save figure
+        timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        filename = f"{self.algo_env_dir}/steps_{timestamp}.png"
+        plt.savefig(filename)
+        print(f"Saved steps plot to {filename}")
+        
+        plt.close()
+    
+    def plot_success_rate(self):
+        """Plot success rate over time (by window)"""
+        if not self.success_rates:
+            print("Not enough data to generate success rate plot")
+            return
+            
+        plt.figure(figsize=(12, 6))
+        
+        # Plot success rates
+        windows = range(1, len(self.success_rates) + 1)
+        window_episodes = [w * self.window_size for w in windows]
+        
+        plt.plot(window_episodes, self.success_rates, marker='o', color='orange', linewidth=2)
+        
+        plt.xlabel('Episode')
+        plt.ylabel('Success Rate')
+        plt.title(f'Success Rate by {self.window_size}-Episode Window - {self.algorithm_name} ({self.environment_name})')
+        plt.grid(True, alpha=0.3)
+        
+        # Set y-axis limits
+        plt.ylim([-0.05, 1.05])
+        
+        # Add percentage labels to y-axis
+        plt.gca().yaxis.set_major_formatter(plt.FuncFormatter(lambda y, _: '{:.0%}'.format(y)))
+        
+        # Save figure
+        timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        filename = f"{self.algo_env_dir}/success_rate_{timestamp}.png"
+        plt.savefig(filename)
+        print(f"Saved success rate plot to {filename}")
+        
+        plt.close()
+    
+    def plot_goal_intervals(self):
+        """Plot the number of episodes between consecutive goal reaches"""
+        if len(self.goal_reach_intervals) < 2:
+            print("Not enough goal reaches to generate interval plot")
+            return
+            
+        plt.figure(figsize=(12, 6))
+        
+        # Plot intervals
+        goals = range(2, len(self.goal_reached_episodes) + 1)
+        
+        plt.plot(goals, self.goal_reach_intervals, marker='o', color='red', linewidth=2)
+        
+        plt.xlabel('Goal Number')
+        plt.ylabel('Episodes Since Last Goal')
+        plt.title(f'Episodes Between Consecutive Goals - {self.algorithm_name} ({self.environment_name})')
+        plt.grid(True, alpha=0.3)
+        
+        # Make x-axis use integer ticks
+        plt.gca().xaxis.set_major_locator(MaxNLocator(integer=True))
+        
+        # Save figure
+        timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        filename = f"{self.algo_env_dir}/goal_intervals_{timestamp}.png"
+        plt.savefig(filename)
+        print(f"Saved goal intervals plot to {filename}")
+        
+        plt.close()
+    
+    def generate_all_plots(self):
+        """Generate all available plots"""
+        if len(self.episode_rewards) < 2:
+            print("Not enough data to generate plots")
+            return
+            
+        self.plot_rewards()
+        self.plot_learning_rate()
+        self.plot_steps_per_episode()
+        self.plot_success_rate()
+        self.plot_goal_intervals()
+    
+    def save_metrics(self):
+        """Save raw metrics data for future processing"""
+        data = {
+            'algorithm': self.algorithm_name,
+            'environment': self.environment_name,
+            'episode_rewards': self.episode_rewards,
+            'learning_rates': self.learning_rates,
+            'episode_steps': self.episode_steps,
+            'goal_reached_episodes': self.goal_reached_episodes,
+            'total_goals_reached': self.total_goals_reached,
+            'first_goal_reached_episode': self.first_goal_reached_episode,
+            'goal_reach_intervals': self.goal_reach_intervals,
+            'success_rates': self.success_rates,
+            'timestamp': datetime.now().strftime("%Y%m%d-%H%M%S")
+        }
+        
+        timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        filename = f"{self.algo_env_dir}/metrics_{timestamp}.pkl"
+        
+        with open(filename, 'wb') as f:
+            pickle.dump(data, f)
+            
+        # Also save the most recent metrics for easy access
+        latest_filename = f"{self.algo_env_dir}/metrics_latest.pkl"
+        with open(latest_filename, 'wb') as f:
+            pickle.dump(data, f)
+            
+        print(f"Saved metrics data to {filename}")
+        
+        # Generate a text summary
+        self.save_text_summary()
+    
+    def save_text_summary(self):
+        """Save a text summary of the training run"""
+        timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        filename = f"{self.algo_env_dir}/summary_{timestamp}.txt"
+        
+        with open(filename, 'w') as f:
+            f.write(f"TRAINING SUMMARY FOR {self.algorithm_name} ON {self.environment_name}\n")
+            f.write(f"Generated on {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+            f.write("="*70 + "\n\n")
+            
+            f.write(f"Total episodes: {len(self.episode_rewards)}\n")
+            f.write(f"Total goals reached: {self.total_goals_reached}\n")
+            
+            if self.first_goal_reached_episode:
+                f.write(f"First goal reached at episode: {self.first_goal_reached_episode}\n")
+            else:
+                f.write("Goal never reached\n")
+                
+            if self.goal_reach_intervals:
+                f.write(f"Average episodes between goals: {np.mean(self.goal_reach_intervals):.2f}\n")
+                f.write(f"Min episodes between goals: {np.min(self.goal_reach_intervals)}\n")
+                f.write(f"Max episodes between goals: {np.max(self.goal_reach_intervals)}\n")
+            
+            f.write("\nPERFORMANCE METRICS\n")
+            f.write(f"Average reward (all episodes): {np.mean(self.episode_rewards):.2f}\n")
+            
+            # Fix the conditional formatting
+            if len(self.episode_rewards) >= 1000:
+                avg_reward_last_1000 = f"{np.mean(self.episode_rewards[-1000:]):.2f}"
+                f.write(f"Average reward (last 1000 episodes): {avg_reward_last_1000}\n")
+            else:
+                f.write("Average reward (last 1000 episodes): N/A\n")
+                
+            f.write(f"Average steps per episode: {np.mean(self.episode_steps):.2f}\n")
+            
+            f.write("\nSUCCESS RATES\n")
+            if self.success_rates:
+                f.write(f"Final success rate ({self.window_size}-episode window): {self.success_rates[-1]:.2%}\n")
+                f.write(f"Peak success rate: {max(self.success_rates):.2%}\n")
+            else:
+                f.write("No success rate data available\n")
+                
+            f.write("\nGOAL REACHED EPISODES\n")
+            if self.goal_reached_episodes:
+                if len(self.goal_reached_episodes) <= 20:
+                    f.write(f"All goal episodes: {', '.join(map(str, self.goal_reached_episodes))}\n")
+                else:
+                    f.write(f"First 10 goal episodes: {', '.join(map(str, self.goal_reached_episodes[:10]))}\n")
+                    f.write(f"Last 10 goal episodes: {', '.join(map(str, self.goal_reached_episodes[-10:]))}\n")
+            else:
+                f.write("No goals reached\n")
+        
+        print(f"Saved text summary to {filename}")
+
+
+def compare_algorithms(metrics_files, output_dir="comparisons", smoothing=25):
+    """
+    Create comparison plots for multiple algorithms
+    
+    Args:
+        metrics_files: List of pickle files containing metrics data
+        output_dir: Directory to save comparison plots
+        smoothing: Window size for smoothing
+    """
+    os.makedirs(output_dir, exist_ok=True)
+    
+    # Load all metrics data
+    algorithms_data = []
+    for file_path in metrics_files:
+        try:
+            with open(file_path, 'rb') as f:
+                data = pickle.load(f)
+                algorithms_data.append(data)
+                print(f"Loaded metrics from {file_path}")
+        except Exception as e:
+            print(f"Error loading {file_path}: {e}")
+    
+    if not algorithms_data:
+        print("No valid metrics data found. Cannot generate comparisons.")
+        return
+    
+    # Ensure all algorithms have the same environment for fair comparison
+    environments = set(data.get('environment', 'default') for data in algorithms_data)
+    if len(environments) > 1:
+        print(f"Warning: Comparing algorithms across different environments: {environments}")
+    
+    # Generate comparison plots
+    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    
+    # 1. Rewards comparison
+    plot_rewards_comparison(algorithms_data, output_dir, timestamp, smoothing)
+    
+    # 2. Success rates comparison (if available)
+    if all('success_rates' in data and data['success_rates'] for data in algorithms_data):
+        plot_success_rates_comparison(algorithms_data, output_dir, timestamp)
+    
+    # 3. Steps comparison
+    plot_steps_comparison(algorithms_data, output_dir, timestamp, smoothing)
+    
+    # 4. First goal reach comparison
+    if all('first_goal_reached_episode' in data and data['first_goal_reached_episode'] for data in algorithms_data):
+        plot_first_goal_comparison(algorithms_data, output_dir, timestamp)
+    
+    # 5. Generate text summary
+    generate_comparison_summary(algorithms_data, output_dir, timestamp)
+
+
+def plot_rewards_comparison(algorithms_data, output_dir, timestamp, smoothing=25):
+    """Plot reward comparison between algorithms."""
+    plt.figure(figsize=(14, 8))
+    
+    for data in algorithms_data:
+        algorithm = data['algorithm']
+        rewards = data['episode_rewards']
+        
+        # For clarity in the plot, limit to the first 5000 episodes or the shortest algorithm run
+        max_episodes = 5000
+        rewards = rewards[:max_episodes]
+        
+        # Plot raw rewards with low alpha
+        episodes = range(1, len(rewards) + 1)
+        plt.plot(episodes, rewards, alpha=0.1)
+        
+        # Plot smoothed rewards
+        if len(rewards) > smoothing:
+            smoothed_rewards = []
+            for i in range(len(rewards) - smoothing + 1):
+                smoothed_rewards.append(np.mean(rewards[i:i+smoothing]))
+            
+            smooth_x = range(smoothing // 2 + 1, len(rewards) - smoothing // 2 + 1)
+            plt.plot(smooth_x, smoothed_rewards, label=f'{algorithm}', linewidth=2)
+    
+    plt.xlabel('Episode')
+    plt.ylabel('Reward')
+    plt.title('Algorithm Comparison - Episode Rewards')
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+    
+    filename = f"{output_dir}/rewards_comparison_{timestamp}.png"
+    plt.savefig(filename)
+    print(f"Saved rewards comparison to {filename}")
+    
+    plt.close()
+
+
+def plot_success_rates_comparison(algorithms_data, output_dir, timestamp):
+    """Plot success rate comparison between algorithms."""
+    plt.figure(figsize=(14, 8))
+    
+    for data in algorithms_data:
+        algorithm = data['algorithm']
+        success_rates = data['success_rates']
+        window_size = 100  # Assume standard window size
+        
+        # Plot success rates
+        if success_rates:
+            windows = range(1, len(success_rates) + 1)
+            window_episodes = [w * window_size for w in windows]
+            plt.plot(window_episodes, success_rates, marker='o', linewidth=2, label=f'{algorithm}')
+    
+    plt.xlabel('Episode')
+    plt.ylabel('Success Rate')
+    plt.title('Algorithm Comparison - Success Rates')
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+    
+    # Set y-axis limits
+    plt.ylim([-0.05, 1.05])
+    
+    # Add percentage labels to y-axis
+    plt.gca().yaxis.set_major_formatter(plt.FuncFormatter(lambda y, _: '{:.0%}'.format(y)))
+    
+    filename = f"{output_dir}/success_rates_comparison_{timestamp}.png"
+    plt.savefig(filename)
+    print(f"Saved success rates comparison to {filename}")
+    
+    plt.close()
+
+
+def plot_steps_comparison(algorithms_data, output_dir, timestamp, smoothing=25):
+    """Plot steps per episode comparison between algorithms."""
+    plt.figure(figsize=(14, 8))
+    
+    for data in algorithms_data:
+        algorithm = data['algorithm']
+        steps = data['episode_steps']
+        
+        # For clarity, limit to first 5000 episodes or shortest algorithm run
+        max_episodes = 5000
+        steps = steps[:max_episodes]
+        
+        # Plot smoothed steps
+        if len(steps) > smoothing:
+            smoothed_steps = []
+            for i in range(len(steps) - smoothing + 1):
+                smoothed_steps.append(np.mean(steps[i:i+smoothing]))
+            
+            smooth_x = range(smoothing // 2 + 1, len(steps) - smoothing // 2 + 1)
+            plt.plot(smooth_x, smoothed_steps, label=f'{algorithm}', linewidth=2)
+    
+    plt.xlabel('Episode')
+    plt.ylabel('Steps')
+    plt.title('Algorithm Comparison - Steps per Episode')
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+    
+    filename = f"{output_dir}/steps_comparison_{timestamp}.png"
+    plt.savefig(filename)
+    print(f"Saved steps comparison to {filename}")
+    
+    plt.close()
+
+
+def plot_first_goal_comparison(algorithms_data, output_dir, timestamp):
+    """Create a bar chart showing episodes to first goal for each algorithm."""
+    plt.figure(figsize=(12, 6))
+    
+    algorithms = []
+    first_goal_episodes = []
+    
+    for data in algorithms_data:
+        algorithms.append(data['algorithm'])
+        first_goal_episodes.append(data.get('first_goal_reached_episode', 0))
+    
+    # Create bar chart
+    plt.bar(algorithms, first_goal_episodes)
+    
+    # Add value labels on top of bars
+    for i, v in enumerate(first_goal_episodes):
+        plt.text(i, v + 5, str(v), ha='center')
+    
+    plt.xlabel('Algorithm')
+    plt.ylabel('Episode')
+    plt.title('Episodes Until First Goal Reached')
+    plt.grid(True, alpha=0.3, axis='y')
+    
+    filename = f"{output_dir}/first_goal_comparison_{timestamp}.png"
+    plt.savefig(filename)
+    print(f"Saved first goal comparison to {filename}")
+    
+    plt.close()
+
+
+def generate_comparison_summary(algorithms_data, output_dir, timestamp):
+    """Generate a text summary comparing all algorithms."""
+    filename = f"{output_dir}/algorithms_comparison_{timestamp}.txt"
+    
+    with open(filename, 'w') as f:
+        f.write("ALGORITHM COMPARISON SUMMARY\n")
+        f.write(f"Generated on {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+        f.write("="*80 + "\n\n")
+        
+        # Environment information
+        environments = set(data.get('environment', 'default') for data in algorithms_data)
+        f.write(f"Environments in comparison: {', '.join(environments)}\n\n")
+        
+        # Table header
+        f.write("| Algorithm | Total Episodes | Goals Reached | First Goal | Avg. Reward | Avg. Steps | Peak Success |\n")
+        f.write("|" + "-"*11 + "|" + "-"*16 + "|" + "-"*14 + "|" + "-"*11 + "|" + "-"*12 + "|" + "-"*11 + "|" + "-"*14 + "|\n")
+        
+        for data in algorithms_data:
+            algorithm = data['algorithm']
+            total_episodes = len(data['episode_rewards'])
+            goals_reached = data.get('total_goals_reached', 0)
+            first_goal = data.get('first_goal_reached_episode', 'N/A')
+            avg_reward = np.mean(data['episode_rewards'])
+            avg_steps = np.mean(data['episode_steps'])
+            
+            # Calculate peak success rate
+            success_rates = data.get('success_rates', [])
+            peak_success = max(success_rates) if success_rates else 0
+            
+            f.write(f"| {algorithm:<9} | {total_episodes:>14} | {goals_reached:>12} | {str(first_goal):>9} | {avg_reward:>10.2f} | {avg_steps:>9.2f} | {peak_success:>12.2%} |\n")
+        
+        f.write("\n\n")
+        f.write("DETAILED METRICS\n")
+        f.write("="*80 + "\n\n")
+        
+        for data in algorithms_data:
+            algorithm = data['algorithm']
+            f.write(f"Algorithm: {algorithm}\n")
+            f.write("-"*50 + "\n")
+            
+            # Episode info
+            total_episodes = len(data['episode_rewards'])
+            f.write(f"Total episodes run: {total_episodes}\n")
+            
+            # Goal statistics
+            goals_reached = data.get('total_goals_reached', 0)
+            first_goal = data.get('first_goal_reached_episode', 'Never')
+            f.write(f"Total goals reached: {goals_reached}\n")
+            f.write(f"First goal reached at episode: {first_goal}\n")
+            
+            # Success rate
+            success_rates = data.get('success_rates', [])
+            if success_rates:
+                f.write(f"Final success rate: {success_rates[-1]:.2%}\n")
+                f.write(f"Peak success rate: {max(success_rates):.2%}\n")
+            
+            # Intervals between goals
+            intervals = data.get('goal_reach_intervals', [])
+            if intervals:
+                f.write(f"Average episodes between goals: {np.mean(intervals):.2f}\n")
+                f.write(f"Shortest interval between goals: {min(intervals)}\n")
+                f.write(f"Longest interval between goals: {max(intervals)}\n")
+            
+            # Reward and steps
+            f.write(f"Average reward per episode: {np.mean(data['episode_rewards']):.2f}\n")
+            f.write(f"Average steps per episode: {np.mean(data['episode_steps']):.2f}\n")
+            
+            if total_episodes >= 1000:
+                f.write(f"Average reward (last 1000 episodes): {np.mean(data['episode_rewards'][-1000:]):.2f}\n")
+                f.write(f"Average steps (last 1000 episodes): {np.mean(data['episode_steps'][-1000:]):.2f}\n")
+            
+            f.write("\n\n")
+    
+    print(f"Saved comparison summary to {filename}")
