@@ -1,0 +1,755 @@
+# main_controller_ppo.py
+from controller import Robot
+from python_controller import BioloidRobot
+from python_controller import FRONT_LEFT_1, FRONT_RIGHT_1, FRONT_LEFT_2, FRONT_RIGHT_2, FRONT_LEFT_3, FRONT_RIGHT_3
+from python_controller import BACK_LEFT_1, BACK_RIGHT_1, BACK_LEFT_2, BACK_RIGHT_2, BACK_LEFT_3, BACK_RIGHT_3
+from python_controller import NECK_1, NECK_2, HEAD, PELVIS
+from balance import BalanceController
+from sensor_tuning import SensorProcessor
+from unsticking import UnstickingController
+from maze_navigation import MazeNavigator
+from ppo import PPOAgent
+from enhanced_training_metrics import EnhancedTrainingMetrics
+
+#from multiprocessing import shared_memory #Python 3.8+ only
+import zmq
+import json
+
+import time
+import numpy as np
+import torch
+import os
+
+# Set up ZMQ connection for supervisor communication (same as in PPO)
+contextOUT = zmq.Context()
+socketOUT = contextOUT.socket(zmq.PUSH)
+socketOUT.bind("tcp://localhost:5567")  # Bind to a port
+
+contextIN = zmq.Context()
+socketIN = contextIN.socket(zmq.SUB) #Subscribe to notifications from supervisor.
+socketIN.connect("tcp://localhost:5568")  # Bind to a port
+socketIN.setsockopt_string(zmq.SUBSCRIBE, "")
+#context = zmq.Context()
+#socket = context.socket(zmq.PUSH)
+#socket.bind("tcp://localhost:5557")  # Bind to a port
+
+class MainControllerPPO:
+    
+    def __init__(self):
+        # Get configuration from environment variables
+        self.environment_name = os.environ.get("ENVIRONMENT", "default")
+        self.run_id = os.environ.get("RUN_ID", "0")
+        self.max_episodes = int(os.environ.get("MAX_EPISODES", "20000"))
+        self.early_stop_threshold = 15000 #int(os.environ.get("EARLY_STOP_THRESHOLD", "200")) #THIS WILL CAUSE TERMINATION IF TOO LOW!!!
+        self.results_dir = os.environ.get("RESULTS_DIR", "training_results")
+        
+        # Initialize the robot
+        print(f"MAINCONT - INIT: Initializing robot controller for {self.environment_name} (Run {self.run_id})...")
+        self.webots_robot = Robot()
+        self.robot = BioloidRobot(self.webots_robot)
+        
+        # Define gait setup
+        self.GAIT_SETUP = [
+            [FRONT_LEFT_1, FRONT_LEFT_3],
+            [FRONT_RIGHT_1, FRONT_RIGHT_3],
+            [BACK_RIGHT_1, BACK_RIGHT_3],
+            [BACK_LEFT_1, BACK_LEFT_3]
+        ]
+        
+        #TEST SHARED MEMORY COMMS
+        #shm = shared_memory.SharedMemory(create=True, size=512)
+        socketOUT.send_string("Shared memory test successful, time: " + str( time.time() ))
+        print("SHAREDMEM: sent message")
+
+        # Initialize modules
+        print("Setting up sensor processor...")
+        self.sensor_processor = SensorProcessor(self.robot)
+        
+        print("Setting up balance controller...")
+        self.balance_controller = BalanceController(self.robot)
+        
+        print("Setting up maze navigator...")
+        self.maze_navigator = MazeNavigator(self.robot, self.sensor_processor)
+        
+        print("Setting up unsticking controller...")
+        # Pass self as the controller to UnstickingController
+        self.unsticking_controller = UnstickingController(self.robot, self.sensor_processor)#, self)
+        
+        print("Setting up PPO agent...")
+        # Initialize PPO agent with 4 actions: forward, right, left, wait
+        self.ppo_agent = PPOAgent(self.maze_navigator.grid_size, num_actions=4)
+        
+        # Episode tracking
+        self.episode_count = 0
+        self.step_count = 0
+        self.steps_per_episode = 200  # Increased from 50 to give more time to reach goal
+        self.total_reward = 0
+        self.best_total_reward = float('-inf')  # Track best episode reward
+
+        self.is_goal_reached = False
+        self.is_episode_end = False
+        
+        # Initialize metrics tracker with environment-specific name
+        self.metrics = EnhancedTrainingMetrics(
+            algorithm_name="PPO",
+            environment_name=f"{self.environment_name}_run{self.run_id}",
+            results_dir=self.results_dir
+        )
+        
+        # For early stopping
+        self.best_average_reward = float('-inf')
+        self.episodes_without_improvement = 0
+        
+        # Load model if available
+        model_path = f'ppo_model_{self.environment_name}_{self.run_id}.pth'
+        try:
+            self.ppo_agent.load_model(model_path)
+        except Exception as e:
+            print(f"Note: Could not load model, starting fresh. Error: {e}")
+            # Try to load the generic model as fallback
+            try:
+                self.ppo_agent.load_model('ppo_model.pth')
+                print("Loaded generic PPO model as fallback.")
+            except:
+                print("No models available, starting from scratch.")
+        
+        # Setup robot
+        print("Initializing robot...")
+        self.robot.init_camera()
+        
+        # Calibrate IMU
+        print("Calibrating IMU...")
+        self.balance_controller.calibrate()
+        
+        # Set robot to standing position
+        self.robot.standing()
+        
+        print("Robot controller initialization complete.")
+    
+    @staticmethod
+
+    def sendToSupervisor(condition: str, value: bool): #fallen, goalReached, timeout):
+        #Send JSON data to supervisor for failure / reset conditions
+        #TODO: Input datatypes?
+        jsonData = {
+                    "fall": (condition == "fallen" and value == True),
+                    "goal": (condition == "goal" and value == True),
+                    "time": (condition == "timeout" and value == True)
+        }
+        socketOUT.send_string(json.dumps(jsonData))
+
+    
+    def run_episode(self, evaluation=False):
+        """Run a single episode."""
+        self.episode_count += 1
+        self.step_count = 0
+        self.total_reward = 0
+        
+        print(f">>>> Starting Episode {self.episode_count} <<<<")
+        
+        # Get initial state
+        current_state = self.get_state()
+        if current_state is None:
+            print("Error: Unable to get current state.")
+            return False
+        
+        current_grid_pos = self.maze_navigator.get_current_grid_position()
+        print(f"Initial position: Grid {current_grid_pos}")
+        
+        # Reset robot to standing position
+        self.robot.standing()
+        
+        # Run steps until episode ends
+        self.is_episode_end = False
+        self.is_goal_reached = False
+        
+        # Display the current policy every 10 episodes
+        if self.episode_count % 10 == 0 and not evaluation:
+            print("Current policy visualization:")
+            self.ppo_agent.print_policy()
+        
+        while not self.is_episode_end:
+            if self.is_goal_reached:
+                print(">>>> GOAL REACHED, RESETTING <<<<")
+                MainControllerPPO.sendToSupervisor("goal",True) #fallen, goal, timeout
+                break
+
+            # Increment step count
+            self.step_count += 1
+            # Check for maximum steps in a single episode
+            if self.step_count > self.steps_per_episode:
+                print(f"Maximum steps ({self.steps_per_episode}) per episode reached, ending this episode.")
+                self.is_episode_end = True
+                break #Quit loop.
+
+            #Check for incoming messages here prior to balance checks to see if IMU needs recalibration
+            try:
+                message = socketIN.recv_string(flags=zmq.NOBLOCK) #Tag as non-blocking so it doesn't jam the entire program!
+                if(message == "imuReset"):
+                    print(">>> MAINCONT: GOT RESET SIGNAL, REINITIALIZING IMU... <<<")
+                    #self.__init__() #Rerun init script? Returns error, may need further troubleshooting
+                    self.balance_controller.calibrate() #Calibrate IMU before balance check
+                    break #quit loop and wait for reinit?
+            except zmq.Again:
+                pass
+            
+            # Check balance
+            if(self.balance_controller.is_fallen()): #NOTE: This only works if IMU is calibrated with robot in upright position.
+                #Robot has fallen, so do nothing until supervisor resets us.
+                print("MAINCONT: Robot has fallen, waiting for supervisor reset...")
+                MainControllerPPO.sendToSupervisor("goal", True) #fallen, goal, timeout
+                continue #Skip rest of loop but do not start new episode, this is done above
+            else:
+                print("MAINCONT: ROBOT HAS NOT FALLEN OVER")
+            if self.balance_controller.is_falling():
+                print("MAINCONT: Robot is losing balance. Applying correction...")
+                self.balance_controller.apply_balance_correction()
+                
+                # If still falling, end episode
+                if self.balance_controller.is_falling():
+                    print("MAINCONT: Robot is falling. Ending episode.")
+                    reward = self.maze_navigator.calculate_reward(is_fall=True)
+                    self.total_reward += reward
+                    self.is_episode_end = True
+                    break
+            
+            # Check for collisions
+            collisions = self.sensor_processor.detect_collisions()
+
+            # PPO action selection
+            try:
+                if evaluation:
+                    action = self.ppo_agent.choose_action(current_state, evaluation=True) #LiDAR data is fed to PPO algo
+                    action_log_prob = 0  # Not used during evaluation
+                    value = 0  # Not used during evaluation
+                else:
+                    # Get action, log probability, and value from network
+                    action, action_log_prob, value = self.ppo_agent.network.get_action(current_state) #LiDAR data is fed to PPO algo
+                    
+                    # Validate values
+                    if isinstance(action, torch.Tensor):
+                        action = action.item()
+                    
+                    # Ensure action is a valid integer
+                    if not isinstance(action, (int, np.integer)):
+                        print(f"WARNING: Invalid action type: {type(action)}, using random action")
+                        action = np.random.choice([0, 1, 2, 3])
+            except Exception as e:
+                print(f"Error in action selection: {e}")
+                action = np.random.choice([0, 1, 2, 3])
+                action_log_prob = 0
+                value = 0
+                
+            # Validate action value
+            if action not in [0, 1, 2, 3]:
+                print(f"WARNING: Invalid action value: {action}, using random action")
+                action = np.random.choice([0, 1, 2, 3])
+            
+            action_names = ["Forward", "Right", "Left", "Wait"]
+            print(f"Step {self.step_count}: Choosing action {action_names[action]}")
+            current_grid_pos = self.maze_navigator.get_current_grid_position()
+            print(f"Current position: Grid {current_grid_pos}")
+            if(evaluation == True):
+                print("MAINCONT: THIS IS AN EVALUATION EPISODE.")
+
+            if collisions:
+                # End episode on collision
+                self.is_episode_end = True
+                print(f"Collision detected at step {self.step_count}.")
+                reward = self.maze_navigator.calculate_reward(is_collision=True)
+                self.total_reward += reward
+                
+                # Store transition in the buffer if training
+                if not evaluation:
+                    try:
+                        self.ppo_agent.store_transition(
+                            current_state, action, action_log_prob, reward, True, value
+                        )
+                    except Exception as e:
+                        print(f"Error storing transition after collision: {e}")
+                
+                # Apply unsticking procedure
+                self.unsticking_controller.unstick(collisions)
+                print("Completed unstick, starting new episode...")
+                break
+            
+            # Execute action if no collisions
+            if not collisions:
+                if action == 3:  # Wait action
+                    # Just do nothing for a bit
+                    time_steps = int(500 / self.robot._control_step)
+                    for _ in range(time_steps):
+                        self.robot._robot.step(self.robot._control_step)
+                else:
+                    self.execute_action(action)
+                    
+            # Get new state
+            next_state = self.get_state()
+            
+            # Reset to standing position
+            self.robot.standing()
+            
+            if next_state is None:
+                print("Error: Unable to get next state.")
+                self.is_episode_end = True
+                break
+            
+            # Calculate reward
+            reward = self.maze_navigator.calculate_reward()
+            self.total_reward += reward
+            print(f"Reward: {reward:.2f}, Total reward: {self.total_reward:.2f}")
+            
+            # Check if reached goal
+            distance_to_goal = self.maze_navigator.calculate_distance_to_goal_grid()
+            is_done = False
+            
+            print(">>>> MAINCONT: Distance to goal: " + str(distance_to_goal) + " <<<<")
+            if distance_to_goal < 1:
+                print(">>>> GOAL REACHED - ENDING EPISODE... <<<<")
+                goal_reward = 100  # Additional reward for reaching goal
+                reward += goal_reward
+                self.total_reward += goal_reward
+                self.is_goal_reached = True
+                self.is_episode_end = True
+                is_done = True
+            
+            # Store transition in the buffer if training
+            if not evaluation:
+                try:
+                    self.ppo_agent.store_transition(
+                        current_state, action, action_log_prob, reward, is_done, value
+                    )
+                except Exception as e:
+                    print(f"Error storing transition: {e}")
+            
+            # Update current state
+            current_state = next_state
+            
+            # Pause for a brief moment to allow robot to stabilize
+            time_steps = int(100 / self.robot._control_step)
+            for _ in range(time_steps):
+                self.robot._robot.step(self.robot._control_step)
+            
+            # Display episode information
+            self.display_episode_info()
+        
+        # Update PPO agent if we have enough experiences and not in evaluation mode
+        if not evaluation and len(self.ppo_agent.memory.states) > 0:
+            try:
+                self.ppo_agent.learn()
+                
+                # Update exploration rate
+                self.ppo_agent.update_exploration_rate()
+                
+                # Save model if this is the best episode so far
+                if self.total_reward > self.best_total_reward:
+                    self.best_total_reward = self.total_reward
+                    self.ppo_agent.save_model(f'ppo_model_{self.environment_name}_{self.run_id}.pth')
+                    print(f"New best model saved with reward: {self.best_total_reward:.2f}")
+                
+                # Periodically save model
+                if self.episode_count % 10 == 0:
+                    self.ppo_agent.save_model(f'ppo_model_{self.environment_name}_{self.run_id}_ep{self.episode_count}.pth')
+                    
+                # Print policy periodically to see how it's evolving
+                if self.episode_count % 10 == 0:
+                    self.ppo_agent.print_policy()
+            except Exception as e:
+                print(f"Error in PPO learning step: {e}")
+        
+        # Record metrics
+        self.metrics.add_episode_data(
+            episode_num=self.episode_count,
+            total_reward=self.total_reward,
+            learning_rate=self.ppo_agent.exploration_rate,
+            steps=self.step_count,
+            goal_reached=self.is_goal_reached
+        )
+        
+        # Save metrics after every episode
+        if self.episode_count % 5 == 0:  # Save less frequently to reduce disk I/O
+            self.metrics.save_metrics()
+        
+        # Generate plots periodically
+        if self.episode_count % 50 == 0:
+            self.metrics.generate_all_plots()
+
+        print("MAINCONT: Dist-to-goal: " + str(self.is_goal_reached))
+        #Controller never gets here after goal is reached?
+        if(self.is_goal_reached == True):
+            #Send comms to supervisor to initiate reset
+            print("MAINCONT: Asking for supervisor reset...")
+            MainControllerPPO.sendToSupervisor("goal", True) #fallen, goal, timeout
+
+        #TODO: is this return needed?
+
+        # Return whether goal was reached to the main loop
+        return self.is_goal_reached
+    
+    def check_collisions(self):
+        #Check if robot has collided with something.
+        collisions = self.sensor_processor.detect_collisions() #SensorProcessor.detect_collisions(self)
+        retVal = False
+        if collisions: retVal = True
+        return retVal
+    
+    def get_state(self):
+        """
+        Construct the state vector for the PPO agent.
+        Should return 33 features: [distance_to_goal] + [32 lidar readings]
+        """
+        # Get LiDAR data (normalized)
+        lidar_data = self.sensor_processor.get_lidar_data_normalized()
+        if lidar_data is None or len(lidar_data) != 32:
+            print("WARNING: Invalid or missing LiDAR data, defaulting to zeros")
+            lidar_data = np.zeros(32)
+
+        # Get distance to goal (use grid or GPS-based calculation)
+        distance = self.maze_navigator.calculate_distance_to_goal_grid()
+    
+        # Normalise distance (optional, but recommended for stability)
+        max_possible_distance = np.sqrt(20**2 + 20**2)
+        distance = min(distance / max_possible_distance, 1.0)
+
+        # Combine into a single state vector
+        state = np.array([distance] + list(lidar_data), dtype=np.float32)
+    
+        # Final check for shape
+        if len(state) != 33:
+            print(f"ERROR: State length is {len(state)} instead of 33")
+
+        return state
+
+
+    def execute_action(self, action):
+        """Execute the given action on the robot."""
+        if action == 0:  # Move forward
+            self.move_forward()
+        elif action == 1:  # Turn right
+            self.turn_right()
+            #self.move_forward()
+        elif action == 2:  # Turn left
+            self.turn_left()
+            #self.move_forward()
+        elif action == 3:  # Wait (do nothing)
+            time_steps = int(500 / self.robot._control_step)
+            for _ in range(time_steps):
+                self.robot._robot.step(self.robot._control_step)
+        else:
+            print(f"WARNING: Invalid action: {action}, doing nothing")
+            time_steps = int(500 / self.robot._control_step)
+            for _ in range(time_steps):
+                self.robot._robot.step(self.robot._control_step)
+    
+    def move_forward(self):
+        """Move the robot forward."""
+        print("Moving forward...")
+        #for _ in range(25):  # Adjust number of steps as needed
+        #TODO: Run collision check for each "step", instead of waiting for timeout, meaning the robot will instantly unstick upon running into a wall.
+        initTime = int( time.time() ) #Store init UNIX timestamp
+        #execTime = 2 #How long to do the action for in seconds.
+        execDist = 1 #How many meters to move (accepts floats.)
+        execTime = 5 #Timeout after x number of seconds until we have to give up
+        startPos = self.sensor_processor.get_gps_coordinates() #Log the GPS coordinates of starting positon.
+        print("Moving forward for " + str(execDist) + " meters, timeout: " + str(execTime) + " seconds.") #execTime
+        while MainControllerPPO.euclidean_distance(startPos, self.sensor_processor.get_gps_coordinates()) < execDist and initTime + execTime >= int( time.time() ):
+            distance_to_goal = self.maze_navigator.calculate_distance_to_goal_grid()
+            if(distance_to_goal < 1): #Check if robot reached the goal within the loop.
+                break
+            # Use the existing compute_walking_position method
+            for leg_id in range(4):
+                motor_positions = self.robot.compute_walking_position(
+                    self.robot._step_count * (self.robot._control_step / 1000),
+                    1.0,  # frequency
+                    0,    # gait type (trot)
+                    leg_id,
+                    1.0,  # stride length
+                    False  # not backward
+                )
+                self.robot.set_motor_position(self.GAIT_SETUP[leg_id][0], motor_positions[0])
+                self.robot.set_motor_position(self.GAIT_SETUP[leg_id][1], motor_positions[1])
+            
+            # Step simulation
+            self.robot._robot.step(self.robot._control_step)
+            self.robot._step_count += 1
+            
+            # Apply balance correction during movement
+            self.balance_controller.apply_balance_correction()
+
+            #Check if collision has happened and if so end movement cycle
+
+            if MainControllerPPO.check_collisions(self) == True:
+
+                break
+
+    def move_backward(self):
+        """Back up the robot by 0.1m."""
+        #print("Backing up...")
+
+        # First, set the robot to a standing position
+        #self.robot.standing()
+
+        # Now, move backward by adjusting leg positions
+        #for _ in range(150):  # Adjust number of ???steps??? as needed
+        initTime = int( time.time() ) #Store init UNIX timestamp
+        execDist = 1 #How many meters to move (accepts floats.)
+        execTime = 5 #Timeout after x number of seconds until we have to give up
+        startPos = self.sensor_processor.get_gps_coordinates() #Log the GPS coordinates of starting positon.
+        print("Moving backward for " + str(execDist) + " meters, timeout: " + str(execTime) + " seconds.") #execTime
+        while MainControllerPPO.euclidean_distance(startPos, self.sensor_processor.get_gps_coordinates()) < execDist and initTime + execTime >= int( time.time() ):
+            # Move legs to back up
+            for leg_id in range(4):
+                motor_positions = self.robot.compute_walking_position(
+                    self.robot._step_count * (self.robot._control_step / 1000),
+                    1.0,  # frequency
+                    0,    # gait type (trot)
+                    leg_id,
+                    1.0, #0.5,  # stride length
+                    True  # backward flag
+                )
+                self.robot.set_motor_position(self.GAIT_SETUP[leg_id][0], motor_positions[0])
+                self.robot.set_motor_position(self.GAIT_SETUP[leg_id][1], motor_positions[1])
+
+            # Step simulation
+            self.robot._robot.step(self.robot._control_step)
+            self.robot._step_count += 1
+
+            # Apply balance correction during movement
+            self.balance_controller.apply_balance_correction()
+
+        # Set back to standing position
+        self.robot.standing()
+    
+    def euclidean_distance(v1, v2):
+        """
+        Calculate the Euclidean (L2) distance between two vectors.
+    
+        Parameters:
+        v1, v2 (array-like): Input vectors
+
+        Returns:
+        float: Non-negative Euclidean distance between vectors
+        """
+        v1 = np.array(v1)
+        v2 = np.array(v2)
+
+        # Euclidean distance formula: sqrt(sum((v1 - v2)^2))
+        return np.sqrt(np.sum((v1 - v2) ** 2))
+    
+    def turn_right(self):
+        """Turn the robot right."""
+        initTime = int(time.time())  # Store init UNIX timestamp
+        #execTime = 5  # How long to do the action for in seconds.
+
+        initOrientation = self.balance_controller.get_orientation()
+        turnAmount = np.deg2rad(45)  # Number in degrees of how much to turn by (approximate)
+        desiredRot = MainControllerPPO.wrap_to_pi(initOrientation[2]-turnAmount)  # Ensure radian is wrapped properly.
+        turnDist = MainControllerPPO.angular_distance(self.balance_controller.get_orientation()[2], desiredRot) #abs(self.balance_controller.get_orientation()[2]) - abs(desiredRot) #Check positive distance between angles
+        print("Turning right... initOrientation: " + str(initOrientation[2]) + " desiredRot: " + str(desiredRot) + " distance: " + str(turnDist))
+        
+        #while self.balance_controller.get_orientation()[2] <= desiredRot: #Causes a bug when number wraps over pi
+        while turnDist >= 0.1: #0.1 is a placeholder threshold value
+            turnDist = MainControllerPPO.angular_distance(self.balance_controller.get_orientation()[2], desiredRot) #Update during function
+            for leg_id in range(4):
+                #stride_factor = -0.4 if leg_id % 2 == 0 else 0.4  # Right legs back, left legs forward
+                #stride_factor = 1.0
+                stride_factor = 0.0 if leg_id % 2 == 0 else 1.0 #Move only left legs
+                
+                motor_positions = self.robot.compute_walking_position(
+                    self.robot._step_count * (self.robot._control_step / 1000),
+                    2.0,  # frequency, 1.0
+                    0,    # gait type (trot)
+                    leg_id,
+                    stride_factor, #stride length
+                    False #(leg_id % 2 == 0)  # backward for right legs
+                )
+                self.robot.set_motor_position(self.GAIT_SETUP[leg_id][0], motor_positions[0])
+                self.robot.set_motor_position(self.GAIT_SETUP[leg_id][1], motor_positions[1])
+            
+            # Step simulation
+            self.robot._robot.step(self.robot._control_step)
+            self.robot._step_count += 1
+            
+            # Apply balance correction during turning
+            self.balance_controller.apply_balance_correction()
+
+            if MainControllerPPO.check_collisions(self) == True:
+                break
+
+        endOrientation = self.balance_controller.get_orientation()
+        print("endOrientation: " + str(endOrientation[2]))
+
+    def turn_left(self):
+        """Turn the robot left."""
+        initTime = int(time.time())  # Store init UNIX timestamp
+        #execTime = 5  #UNUSED: How long to do the action for in seconds.
+
+        initOrientation = self.balance_controller.get_orientation()
+        turnAmount = np.deg2rad(45)  # Number in degrees of how much to turn by (approximate)
+        desiredRot = MainControllerPPO.wrap_to_pi(initOrientation[2]+turnAmount)  # Ensure radian is wrapped properly.
+        turnDist = MainControllerPPO.angular_distance(self.balance_controller.get_orientation()[2], desiredRot) #abs(self.balance_controller.get_orientation()[2]) - abs(desiredRot) #Check positive distance between angles
+        print("Turning left... initOrientation: " + str(initOrientation[2]) + " desiredRot: " + str(desiredRot) + " distance: " + str(turnDist))
+        
+        #while self.balance_controller.get_orientation()[2] <= desiredRot: #Causes a bug when number wraps over pi
+        while turnDist >= 0.1: #0.1 is a placeholder threshold value
+            turnDist = MainControllerPPO.angular_distance(self.balance_controller.get_orientation()[2], desiredRot) #Update during function
+            # Left legs move backward, right legs move forward
+            for leg_id in range(4):
+                #stride_factor = 0.4 if leg_id % 2 == 0 else -0.4  # Right legs forward, left legs back
+                #stride_factor = 1.0
+                stride_factor = 1.0 if leg_id % 2 == 0 else 0.0 #Move only right legs
+                
+                motor_positions = self.robot.compute_walking_position(
+                    self.robot._step_count * (self.robot._control_step / 1000),
+                    2.0,  # frequency
+                    0,    # gait type (trot)
+                    leg_id,
+                    stride_factor, #stride length
+                    False #(leg_id % 2 != 0)  # backward for left legs
+                )
+                self.robot.set_motor_position(self.GAIT_SETUP[leg_id][0], motor_positions[0])
+                self.robot.set_motor_position(self.GAIT_SETUP[leg_id][1], motor_positions[1])
+            
+            # Step simulation
+            self.robot._robot.step(self.robot._control_step)
+            self.robot._step_count += 1
+            
+            # Apply balance correction during turning
+            self.balance_controller.apply_balance_correction()
+
+            if MainControllerPPO.check_collisions(self) == True:
+                break
+
+        endOrientation = self.balance_controller.get_orientation()
+        print("endOrientation: " + str(endOrientation[2]))
+
+    def wrap_to_pi(angle):
+        #Wrap a radian angle to the range of -pi to pi
+        return ((angle + np.pi) % (2 * np.pi)) - np.pi
+    
+    # Calculate angular distance using the smallest difference accounting for wrapping
+    def angular_distance(current, target):
+        diff = MainControllerPPO.wrap_to_pi(target - current)
+        return abs(diff)
+    
+    def display_episode_info(self):
+        """Display information about the current episode."""
+        print("\n" + "="*50)
+        print(f"Episode: {self.episode_count}")
+        print(f"Steps: {self.step_count}")
+        print(f"Total Reward: {self.total_reward:.2f}")
+        print(f"Current Position: Grid {self.maze_navigator.get_current_grid_position()}")
+        print(f"Goal Position: Grid {self.maze_navigator.goal_grid}")
+        print(f"Distance to Goal: {self.maze_navigator.calculate_distance_to_goal_grid():.2f} grid cells")
+        print(f"Exploration Rate: {self.ppo_agent.exploration_rate:.4f}")
+        print(f"Environment: {self.environment_name}, Run: {self.run_id}")
+        print("="*50 + "\n")
+    
+    def run(self, num_episodes=None):
+        """Run the main control loop for a number of episodes."""
+        if num_episodes is None:
+            num_episodes = self.max_episodes
+        
+        print(f"Starting training for up to {num_episodes} episodes...")
+        print(f"Environment: {self.environment_name}, Run: {self.run_id}")
+        print(f"MAINCONT - RUN INIT: Early stopping after {self.early_stop_threshold} episodes without improvement")
+    
+        episode = 0
+        goal_reached_count = 0
+    
+        # For tracking average reward (early stopping)
+        recent_rewards = []
+    
+        try:
+            while episode < num_episodes:
+                episode += 1
+                print(f"MAINCONT: Calling for new episode, {episode}/{num_episodes}")
+                goal_reached = self.run_episode(evaluation=False)
+            
+                if goal_reached:
+                    goal_reached_count += 1
+                    print(f"Goal reached in episode {episode}! Total goals reached: {goal_reached_count}")
+                    # Important: Continue training for stability
+            
+                # Track recent rewards for early stopping
+                recent_rewards.append(self.total_reward)
+                if len(recent_rewards) > 20:  # Keep a window of 20 episodes
+                    recent_rewards.pop(0)
+            
+                # Check for early stopping
+                if len(recent_rewards) >= 10:  # Need at least 10 episodes to start checking
+                    avg_reward = np.mean(recent_rewards)
+                    if avg_reward > self.best_average_reward:
+                        self.best_average_reward = avg_reward
+                        self.episodes_without_improvement = 0
+                        # Save best average model
+                        self.ppo_agent.save_model(f'ppo_model_{self.environment_name}_{self.run_id}_best_avg.pth')
+                    else:
+                        self.episodes_without_improvement += 1
+                    
+                    if self.episodes_without_improvement >= self.early_stop_threshold: #NOTE: THIS MAY BE PROBLEMATIC??
+                        print(f"Early stopping after {episode} episodes without improvement")
+                        print(f"Best average reward was {self.best_average_reward:.2f}")
+                        break
+            
+                # Generate plots every 100 episodes
+                if episode % 100 == 0:
+                    self.metrics.generate_all_plots()
+                    self.metrics.save_metrics()
+        
+            # After training, run some evaluation episodes
+            print("Training complete after " + str(self.episode_count) + " episodes. Running evaluation episodes...")
+            self.episode_count = 0
+            for _ in range(5): #RUN 5 EVALUATIONS
+                print("MAINCONT: Calling for EVALUATION episode...")
+                self.run_episode(evaluation=True)
+            
+            # Save final model
+            self.ppo_agent.save_model(f'ppo_model_{self.environment_name}_{self.run_id}_final.pth')
+        
+            # Display final policy
+            print("\nFinal Policy:")
+            self.ppo_agent.print_policy()
+        
+            # Generate final plots and save metrics
+            self.metrics.generate_all_plots()
+            self.metrics.save_metrics()
+        
+            # Return stats for the automated testing system
+            return {
+                "algorithm": "PPO",
+                "environment": self.environment_name,
+                "run_id": self.run_id,
+                "episodes_completed": episode,
+                "goals_reached": goal_reached_count,
+                "best_reward": self.best_total_reward,
+                "best_average_reward": self.best_average_reward
+            }
+        
+        except Exception as e:
+            print(f"Critical error in main loop: {e}")
+            # Save model on error for recovery
+            self.ppo_agent.save_model(f'ppo_model_{self.environment_name}_{self.run_id}_error.pth')
+            # Save metrics even on error
+            self.metrics.generate_all_plots()
+            self.metrics.save_metrics()
+        
+            # Return error stats
+            return {
+                "algorithm": "PPO",
+                "environment": self.environment_name,
+                "run_id": self.run_id,
+                "error": str(e),
+                "episodes_completed": episode,
+                "goals_reached": goal_reached_count,
+                "best_reward": self.best_total_reward
+            }
+    
+# Entry point when this file is run directly
+def main():
+    controller = MainControllerPPO()
+    result = controller.run()
+    print(f"Run completed with result: {result}")
+
+if __name__ == "__main__":
+    main()
