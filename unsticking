@@ -1,0 +1,149 @@
+# unsticking.py
+import math
+from python_controller import FRONT_LEFT_1, FRONT_RIGHT_1, FRONT_LEFT_2, FRONT_RIGHT_2, FRONT_LEFT_3, FRONT_RIGHT_3
+from python_controller import BACK_LEFT_1, BACK_RIGHT_1, BACK_LEFT_2, BACK_RIGHT_2, BACK_LEFT_3, BACK_RIGHT_3
+from python_controller import NECK_1, NECK_2, HEAD, PELVIS
+from balance import BalanceController
+from maze_navigation import MazeNavigator
+import main_controller_ppo
+
+class UnstickingController:
+    def __init__(self, robot, sensor_processor):
+        self.robot = robot
+        self.sensor_processor = sensor_processor
+        # Define gait setup
+        self.GAIT_SETUP = [
+            [FRONT_LEFT_1, FRONT_LEFT_3],
+            [FRONT_RIGHT_1, FRONT_RIGHT_3],
+            [BACK_RIGHT_1, BACK_RIGHT_3],
+            [BACK_LEFT_1, BACK_LEFT_3]
+        ]
+        self.balance_controller = BalanceController(self.robot)
+        self.maze_navigator = MazeNavigator(self.robot, self.sensor_processor)
+        
+    def unstick(self,collisions):
+        """Perform unsticking procedure after a collision."""
+        print("Executing unsticking procedure...")
+        
+        # Step 1: Pause all motors for a second
+        self.pause_motors()
+
+        #Set robot to standing gait
+        self.robot.standing()
+
+        # Step 2: Back up by 0.1m
+        #self.backup()
+        main_controller_ppo.MainControllerPPO.move_backward(self)
+
+        #Set robot to standing gait
+        self.robot.standing()
+
+        # Step 3: Turn away from wall
+        self.turn_away_from_wall(collisions)
+        
+        print("Unsticking procedure completed.")
+    
+    def pause_motors(self):
+        """Pause all motors for a second."""
+        print("Pausing motors...")
+        for motor_id in range(len(self.robot.motors)):
+            if motor_id not in [NECK_1, NECK_2, HEAD]:
+                current_position = self.robot.get_motor_position(motor_id)
+                self.robot.set_motor_position(motor_id, current_position)
+        
+        # Wait for 1 second
+        time_steps = int(1000 / self.robot._control_step)
+        for _ in range(time_steps):
+            self.robot._robot.step(self.robot._control_step)
+    
+    """def backup(self):
+        #Back up the robot by 0.1m
+        print("Backing up...")
+        # First, set the robot to a standing position
+        self.robot.standing()
+        
+        # Now, move backward by adjusting leg positions
+        for _ in range(150):  # Adjust number of ???steps??? as needed
+            # Move legs to back up
+            for leg_id in range(4):
+                motor_positions = self.robot.compute_walking_position(
+                    self.robot._step_count * (self.robot._control_step / 1000),
+                    1.0,  # frequency
+                    0,    # gait type (trot)
+                    leg_id,
+                    0.5,  # stride length
+                    True  # backward flag
+                )
+                self.robot.set_motor_position(self.GAIT_SETUP[leg_id][0], motor_positions[0])
+                self.robot.set_motor_position(self.GAIT_SETUP[leg_id][1], motor_positions[1])
+            
+            # Step simulation
+            self.robot._robot.step(self.robot._control_step)
+            self.robot._step_count += 1
+        
+        # Set back to standing position
+        self.robot.standing()
+        #main_controller.MainController.move_backward(self)"""
+    
+    def turn_away_from_wall(self,collisions):
+        """Turn away from the wall based on collision direction."""
+        #collisions = self.sensor_processor.detect_collisions()
+        if not collisions:
+            # If no collision detected, turn right by default
+            print("No collision detected. Turning right by default.")
+            #self.turn(right=True)
+            main_controller_ppo.MainControllerPPO.turn_right(self)
+            return
+        
+        # Calculate average collision angle
+        total_angle = 0
+        for _, angle in collisions:
+            total_angle += angle
+        avg_angle = total_angle / len(collisions)
+        
+        # Decide which way to turn based on average collision angle
+        # If collision is more on the right side (0 to π), turn left
+        # If collision is more on the left side (π to 2π), turn right
+        right_turn = -(avg_angle > math.pi)
+        print(f"Collision at angle {avg_angle}. Turning {'right' if right_turn else 'left'}.")
+        #self.turn(right=right_turn)
+        if right_turn:
+            main_controller_ppo.MainControllerPPO.turn_right(self)
+        else:
+            main_controller_ppo.MainControllerPPO.turn_left(self)
+    
+    """def turn(self, right=True):
+        #Turn the robot in place.
+        # First, set the robot to a standing position
+        self.robot.standing()
+        
+        # Number of steps to complete the turn
+        turn_steps = 60  # Adjust as needed
+        
+        print(f"Turning {'right' if right else 'left'}...")
+        for _ in range(turn_steps):
+            # Compute leg positions for turning
+            for leg_id in range(4):
+                # Right and left legs move in opposite directions for turning
+                if right:
+                    stride_factor = 0.3 if leg_id % 2 == 0 else -0.3  # Right legs forward, left legs backward
+                else:
+                    stride_factor = -0.3 if leg_id % 2 == 0 else 0.3  # Left legs forward, right legs backward
+                
+                motor_positions = self.robot.compute_walking_position(
+                    self.robot._step_count * (self.robot._control_step / 1000),
+                    1.0,  # frequency
+                    0,    # gait type (trot)
+                    leg_id,
+                    stride_factor,
+                    False  # not backward
+                )
+                self.robot.set_motor_position(self.GAIT_SETUP[leg_id][0], motor_positions[0])
+                self.robot.set_motor_position(self.GAIT_SETUP[leg_id][1], motor_positions[1])
+            
+            # Step simulation
+            self.robot._robot.step(self.robot._control_step)
+            self.robot._step_count += 1
+        
+        # Set back to standing position
+        self.robot.standing()"""
