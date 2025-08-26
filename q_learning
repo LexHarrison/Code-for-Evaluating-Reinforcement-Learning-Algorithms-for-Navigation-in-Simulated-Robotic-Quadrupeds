@@ -1,0 +1,176 @@
+# q_learning.py
+import numpy as np
+import pickle
+import os
+import random
+import math
+
+class QLearningAgent:
+    def __init__(self, grid_size, num_actions=4, learning_rate=0.1, discount_factor=0.99, exploration_rate=1.0, 
+                min_exploration_rate=0.01, exploration_decay=0.995):
+        self.grid_size = grid_size
+        self.learning_rate = learning_rate
+        self.discount_factor = discount_factor
+        self.exploration_rate = exploration_rate
+        self.min_exploration_rate = min_exploration_rate
+        self.exploration_decay = exploration_decay
+        
+        # Map actions to robot movements: 0=forward, 1=right, 2=left, 3=wait
+        self.actions = [0, 1, 2, 3]  # Updated to include wait (3)
+        self.num_actions = len(self.actions)  # Should be 4 now
+        
+        # Initialize dimensions for the Q-table
+        # For grid coordinates from -grid_size to +grid_size in each dimension
+        q_table_width = grid_size[0] * 2
+        q_table_height = grid_size[1] * 2
+        
+        # Initialize Q-table as a 3D array: [x_coord, y_coord, action]
+        # This handles negative coordinates by offsetting the index
+        self.q_table = np.zeros((q_table_width, q_table_height, self.num_actions))
+        
+        print(f"Q-Learning agent initialized with grid size {grid_size}")
+        print(f"Q-table dimensions: {self.q_table.shape}")
+        print(f"Initial exploration rate: {self.exploration_rate}")
+        print(f"Q-Learning has {self.num_actions} possible actions")
+    
+    def choose_action(self, state, evaluation=False):
+        """
+        Choose action using epsilon-greedy policy.
+        
+        Args:
+            state: Current state (x, y grid coordinates)
+            evaluation: If True, always choose the best action (no exploration)
+            
+        Returns:
+            action: The selected action (0-3)
+        """
+        if state is None:
+            print("Q-LEARN: State was None, choosing random action")
+            return random.choice(self.actions)
+        
+        # Extract grid coordinates
+        x, y = state
+        
+        # Convert to Q-table indices (offset for negative coordinates)
+        x_idx = x + self.grid_size[0]
+        y_idx = y + self.grid_size[1]
+        
+        # Ensure state is within valid bounds
+        if (x_idx < 0 or x_idx >= self.q_table.shape[0] or 
+            y_idx < 0 or y_idx >= self.q_table.shape[1]):
+            print(f"Q-LEARN: State {state} out of bounds, choosing random action")
+            return random.choice(self.actions)
+        
+        # Exploration: choose a random action with probability epsilon
+        if not evaluation and random.random() < self.exploration_rate:
+            print("Q-LEARN: Exploration active, choosing random action")
+            return random.choice(self.actions)
+        
+        # Exploitation: choose best action based on Q-values
+        print("Q-LEARN: Using Q-table for action selection")
+        q_values = self.q_table[x_idx, y_idx, :]
+        
+        # If all Q-values are equal (e.g., all zeros), choose randomly
+        if np.all(q_values == q_values[0]):
+            return random.choice(self.actions)
+        
+        # Otherwise, choose action with highest Q-value
+        return np.argmax(q_values)
+    
+    def update_q_value(self, state, action, reward, next_state):
+        """
+        Update Q-value using the Q-learning update rule.
+        
+        Args:
+            state: Current state (x, y coordinates)
+            action: Action taken (0-3)
+            reward: Reward received
+            next_state: Next state (x, y coordinates)
+        """
+        if state is None or next_state is None:
+            print("Q-LEARN: State or next_state is None, skipping update")
+            return
+        
+        # Extract grid coordinates
+        x, y = state
+        nx, ny = next_state
+        
+        # Convert to Q-table indices (offset for negative coordinates)
+        x_idx = x + self.grid_size[0]
+        y_idx = y + self.grid_size[1]
+        nx_idx = nx + self.grid_size[0]
+        ny_idx = ny + self.grid_size[1]
+        
+        # Ensure states are within valid bounds
+        if (x_idx < 0 or x_idx >= self.q_table.shape[0] or y_idx < 0 or y_idx >= self.q_table.shape[1] or
+            nx_idx < 0 or nx_idx >= self.q_table.shape[0] or ny_idx < 0 or ny_idx >= self.q_table.shape[1]):
+            print(f"Q-LEARN: State {state} or next_state {next_state} out of bounds, skipping update")
+            return
+        
+        # Get current Q-value
+        current_q = self.q_table[x_idx, y_idx, action]
+        
+        # Calculate the best future value from next_state
+        best_next_q = np.max(self.q_table[nx_idx, ny_idx, :])
+        
+        # Calculate new Q-value using Q-learning update formula
+        new_q = current_q + self.learning_rate * (reward + self.discount_factor * best_next_q - current_q)
+        
+        # Update Q-table
+        self.q_table[x_idx, y_idx, action] = new_q
+    
+    def update_exploration_rate(self):
+        """Decrease exploration rate over time."""
+        self.exploration_rate = max(self.min_exploration_rate, 
+                                  self.exploration_rate * self.exploration_decay)
+    
+    def save_q_table(self, filename='q_table.pkl'):
+        """Save Q-table to file."""
+        with open(filename, 'wb') as f:
+            pickle.dump(self.q_table, f)
+        print(f"Q-table saved to {filename}")
+    
+    def load_q_table(self, filename='q_table.pkl'):
+        """Load Q-table from file if it exists."""
+        if os.path.exists(filename):
+            try:
+                with open(filename, 'rb') as f:
+                    self.q_table = pickle.load(f)
+                print(f"Q-table loaded from {filename}")
+                return True
+            except Exception as e:
+                print(f"Error loading Q-table: {e}")
+                return False
+        print(f"No Q-table file found at {filename}")
+        return False
+    
+    def print_policy(self):
+        """Print the current policy (best action for each state) for visualization."""
+        action_symbols = ['↑', '→', '←', '⊙']  # Forward, Right, Left, Wait
+        
+        print("\nCurrent Policy:")
+        print("-" * (self.grid_size[0] * 2 + 1))
+        
+        # Print for a sample of the grid (central portion)
+        for y in range(self.grid_size[1] - 1, -self.grid_size[1], -1):  # From top to bottom
+            row = "|"
+            y_idx = y + self.grid_size[1]  # Adjust for indexing
+            
+            for x in range(-self.grid_size[0], self.grid_size[0]):  # From left to right
+                x_idx = x + self.grid_size[0]  # Adjust for indexing
+                
+                # If within bounds, show policy
+                if (0 <= x_idx < self.q_table.shape[0] and 0 <= y_idx < self.q_table.shape[1]):
+                    q_values = self.q_table[x_idx, y_idx, :]
+                    
+                    # If all values are equal (like all zeros), show a special symbol
+                    if np.all(q_values == q_values[0]):
+                        row += "?" + "|"
+                    else:
+                        best_action = np.argmax(q_values)
+                        row += action_symbols[best_action] + "|"
+                else:
+                    row += " |"  # Out of bounds
+            
+            print(row)
+            print("-" * (self.grid_size[0] * 2 + 1))
