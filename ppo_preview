@@ -1,0 +1,125 @@
+# PPO-PREVIEW.py
+import numpy as np
+import torch
+import os
+
+# We need to import the ActorCritic model from the ppo.py file
+from ppo import ActorCritic
+
+# Determine the device to use
+device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+
+# Define grid size to match the environment
+grid_size = (20, 20)
+model_path = 'ppo_model.pth'  # Default model path
+
+# We can specify a different model file on the command line
+import sys
+if len(sys.argv) > 1:
+    model_path = sys.argv[1]
+
+def print_policy(model, input_size=17):
+    """
+    Print the current policy (best action for each state).
+    For visualization purposes.
+    """
+    action_symbols = ['↑', '→', '←', '⊙']  # Forward, Right, Left, Wait
+    
+    print("\nCurrent PPO Policy:")
+    print("-" * (grid_size[0] * 2 + 1))
+    
+    # Calculate maximum possible distance in the grid for normalization
+    max_distance = np.sqrt((grid_size[0] * 2)**2 + (grid_size[1] * 2)**2)
+    
+    # Create a sample state for each grid position
+    for y in range(grid_size[1] - 1, -1, -1):  # Print from top to bottom
+        row = "|"
+        for x in range(grid_size[0]):
+            # Create a mock state for this grid position
+            # For policy display, we need to encode position in state
+            # Calculate approximate distance to goal from this position
+            goal_x, goal_y = 3, 8  # Goal position
+            dx = x - goal_x
+            dy = y - goal_y
+            eucl_dist = np.sqrt(dx**2 + dy**2)
+            normalized_dist = min(1.0, eucl_dist / max_distance)
+            
+            # Create mock state with distance to goal and default LiDAR readings
+            mock_state = np.zeros(input_size)
+            mock_state[0] = normalized_dist
+            
+            # For visualization, set some basic LiDAR readings
+            # All LiDAR readings are set to show no close obstacles by default
+            # Modify edges to simulate walls
+            if x <= 1:  # Left edge
+                mock_state[5:8] = 0.2  # Left side LiDAR readings show closer obstacles
+            if x >= grid_size[0] - 2:  # Right edge
+                mock_state[13:16] = 0.2  # Right side LiDAR readings show closer obstacles
+            if y <= 1:  # Bottom edge
+                mock_state[1:4] = 0.2  # Front LiDAR readings show closer obstacles
+            if y >= grid_size[1] - 2:  # Top edge
+                mock_state[9:12] = 0.2  # Back LiDAR readings show closer obstacles
+            
+            # Get action probabilities from model
+            with torch.no_grad():
+                mock_state_tensor = torch.FloatTensor(mock_state).to(device)
+                action_probs, _ = model(mock_state_tensor)
+                action = torch.argmax(action_probs).item()
+            
+            row += action_symbols[action] + "|"
+        print(row)
+        print("-" * (grid_size[0] * 2 + 1))
+        
+def load_model(model_path):
+    """Load the trained PPO model."""
+    if not os.path.exists(model_path):
+        print(f"Error: Model file '{model_path}' not found.")
+        return None
+    
+    try:
+        # Load the saved model state
+        checkpoint = torch.load(model_path, map_location=device)
+        
+        # Extract model parameters from checkpoint
+        input_size = checkpoint.get('input_size', 17)
+        hidden_size = checkpoint.get('hidden_size', 256)
+        output_size = checkpoint.get('num_actions', 4)
+        
+        # Create model with the same architecture
+        model = ActorCritic(input_size, hidden_size, output_size).to(device)
+        model.load_state_dict(checkpoint['model_state_dict'])
+        model.eval()  # Set to evaluation mode
+        
+        print(f"Successfully loaded model from {model_path}")
+        print(f"Model info: input_size={input_size}, hidden_size={hidden_size}, output_size={output_size}")
+        
+        if 'exploration_rate' in checkpoint:
+            print(f"Exploration rate: {checkpoint['exploration_rate']:.4f}")
+            
+        return model, input_size
+    except Exception as e:
+        print(f"Error loading model: {e}")
+        return None, None
+
+def main():
+    # Load the model
+    model_info = load_model(model_path)
+    if model_info is None or model_info[0] is None:
+        return
+    
+    model, input_size = model_info
+    
+    # Print the policy grid
+    print_policy(model, input_size)
+    
+    print("\nAction Legend:")
+    print("↑ - Move Forward")
+    print("→ - Turn Right")
+    print("← - Turn Left")
+    print("⊙ - Wait")
+    
+    print(f"\nGoal position: (3, 8)")
+    print("Note: The policy visualization is based on distance to goal and simulated LiDAR readings.")
+
+if __name__ == "__main__":
+    main()
