@@ -1,0 +1,19 @@
+# run_q.py
+import os
+from main_controller_q import MainControllerQ
+
+def main():
+    # Get configuration from environment variables
+    max_episodes = int(os.environ.get("MAX_EPISODES", "20000"))
+    algorithm = os.environ.get("ALGORITHM", "Q-Learning")
+    environment = os.environ.get("ENVIRONMENT", "default")
+    run_id = os.environ.get("RUN_ID", "0")
+    
+    print(f"run_q.py: Starting {algorithm} on {environment} (Run {run_id}) for up to {max_episodes} episodes")
+    
+    controller = MainControllerQ()
+    result = controller.run(num_episodes=max_episodes)
+    print(f"Run completed with result: {result}")
+
+if __name__ == "__main__":
+    main()
